@@ -175,7 +175,6 @@ class MusicBot:
         self.voice_client = None
         self.text_channel = None
         self.repeat_mode = RepeatMode.NONE
-        self.seek_event = asyncio.Event()
 
     async def ensure_voice_channel(self, interaction: discord.Interaction):
         if self.voice_client is None:
@@ -188,11 +187,6 @@ class MusicBot:
         return True
 
     def play_next(self, error=None):
-        if self.seek_event.is_set():
-            # This is a seek operation, the seek method will handle the next play
-            self.seek_event.clear()
-            return
-
         if error:
             logging.error(f'Player error: {error}', exc_info=True)
             if isinstance(error, discord.errors.ConnectionClosed):
@@ -224,20 +218,13 @@ class MusicBot:
         if not self.current_song or not self.voice_client.is_playing():
             return
 
-        # Set the event to signal that a seek is in progress
-        self.seek_event.set()
-        
-        # Create the new player before stopping, to ensure data is ready
+        # Create the new player with the seek option
         new_player = self.current_song.clone(seek=position)
         
-        # Stop the current player. The `after` function (`play_next`) will see the event and do nothing.
+        # Stop the current player, wait briefly for the state to update, then play the new source
         self.voice_client.stop()
-        
-        # Play the new player.
+        await asyncio.sleep(0.1) # Small delay to allow the player to fully stop
         self.voice_client.play(new_player, after=self.play_next)
-        # The event is cleared inside play_next, but as a fallback, ensure it's cleared if play_next is slow
-        if self.seek_event.is_set():
-             self.seek_event.clear()
 
     def jump(self, position: int) -> bool:
         if not self.queue or not (1 <= position <= len(self.queue)):
