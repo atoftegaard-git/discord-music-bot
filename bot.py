@@ -105,16 +105,16 @@ class YTDLSource(discord.PCMVolumeTransformer):
         return self.__class__(discord.FFmpegPCMAudio(self.data['url'], **options), data=self.data)
 
     @classmethod
-    async def from_search(cls, query, *, loop=None, stream=False, platform: SearchPlatform = SearchPlatform.AUTO):
+    async def from_search(cls, query, *, loop=None, stream=False, platform: SearchPlatform = SearchPlatform.AUTO, timeout: float = 10.0):
         loop = loop or asyncio.get_event_loop()
 
         if platform == SearchPlatform.YOUTUBE:
             logging.info(f"Searching on YouTube for: '{query}'")
-            return await cls.from_url(f"ytsearch:{query}", loop=loop, stream=stream)
+            return await cls.from_url(f"ytsearch:{query}", loop=loop, stream=stream, timeout=timeout)
         
         if platform == SearchPlatform.SOUNDCLOUD:
             logging.info(f"Searching on SoundCloud for: '{query}'")
-            return await cls.from_url(f"scsearch:{query}", loop=loop, stream=stream)
+            return await cls.from_url(f"scsearch:{query}", loop=loop, stream=stream, timeout=timeout)
 
         # Prioritized search (auto)
         # 1. Spotify
@@ -127,26 +127,26 @@ class YTDLSource(discord.PCMVolumeTransformer):
                     title = track['name']
                     search_query = f"{artist} - {title}"
                     logging.info(f"Found on Spotify: '{search_query}'. Searching on YouTube.")
-                    return await cls.from_url(f"ytsearch:{search_query}", loop=loop, stream=stream)
+                    return await cls.from_url(f"ytsearch:{search_query}", loop=loop, stream=stream, timeout=timeout)
             except Exception as e:
                 logging.error(f"Spotify search failed: {e}")
 
         # 2. YouTube
         logging.info(f"Searching on YouTube for: '{query}'")
-        results = await cls.from_url(f"ytsearch:{query}", loop=loop, stream=stream)
+        results = await cls.from_url(f"ytsearch:{query}", loop=loop, stream=stream, timeout=timeout)
         if results:
             return results
 
         # 3. SoundCloud
         logging.info(f"Searching on SoundCloud for: '{query}'")
-        return await cls.from_url(f"scsearch:{query}", loop=loop, stream=stream)
+        return await cls.from_url(f"scsearch:{query}", loop=loop, stream=stream, timeout=timeout)
 
 
     @classmethod
-    async def from_url(cls, url, *, loop=None, stream=False):
+    async def from_url(cls, url, *, loop=None, stream=False, timeout: float = 10.0):
         loop = loop or asyncio.get_event_loop()
         try:
-            data = await asyncio.wait_for(loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream)), timeout=10.0)
+            data = await asyncio.wait_for(loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream)), timeout=timeout)
             if not data:
                 return None
             if 'entries' in data:
@@ -316,13 +316,15 @@ async def play(interaction: discord.Interaction, query: str, platform: SearchPla
                             artist = track['artists'][0]['name']
                             title = track['name']
                             search_query = f"{artist} - {title}"
-                            task = YTDLSource.from_search(search_query, loop=client.loop, stream=True, platform=SearchPlatform.YOUTUBE)
+                            task = YTDLSource.from_search(search_query, loop=client.loop, stream=True, platform=SearchPlatform.YOUTUBE, timeout=30.0)
                             search_tasks.append(task)
                     
                     # If the queue is empty, find and play the first song immediately
                     if not music_bot.voice_client.is_playing() and not music_bot.voice_client.is_paused():
                         if search_tasks:
-                            first_song_result = await search_tasks.pop(0)
+                            # Pop the first task to play it immediately
+                            first_search_task = search_tasks.pop(0)
+                            first_song_result = await first_search_task
                             if first_song_result:
                                 music_bot.current_song = first_song_result[0]
                                 music_bot.voice_client.play(music_bot.current_song.clone(), after=music_bot.play_next)
