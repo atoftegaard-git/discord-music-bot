@@ -20,6 +20,12 @@ class RepeatMode(str, Enum):
     QUEUE = "queue"
 
 
+class SearchPlatform(str, Enum):
+    AUTO = "auto"
+    YOUTUBE = "youtube"
+    SOUNDCLOUD = "soundcloud"
+
+
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -92,10 +98,18 @@ class YTDLSource(discord.PCMVolumeTransformer):
         return self.__class__(discord.FFmpegPCMAudio(self.data['url'], **ffmpeg_options), data=self.data)
 
     @classmethod
-    async def from_search(cls, query, *, loop=None, stream=False):
+    async def from_search(cls, query, *, loop=None, stream=False, platform: SearchPlatform = SearchPlatform.AUTO):
         loop = loop or asyncio.get_event_loop()
 
-        # Prioritized search
+        if platform == SearchPlatform.YOUTUBE:
+            logging.info(f"Searching on YouTube for: '{query}'")
+            return await cls.from_url(f"ytsearch:{query}", loop=loop, stream=stream)
+        
+        if platform == SearchPlatform.SOUNDCLOUD:
+            logging.info(f"Searching on SoundCloud for: '{query}'")
+            return await cls.from_url(f"scsearch:{query}", loop=loop, stream=stream)
+
+        # Prioritized search (auto)
         # 1. Spotify
         if spotify:
             try:
@@ -198,8 +212,12 @@ music_bot = MusicBot(client)
 
 
 @tree.command(name="play", description="Plays a song from a URL or search query")
+@app_commands.describe(
+    query="The song URL or search query.",
+    platform="The platform to search first (defaults to auto)."
+)
 @log_command
-async def play(interaction: discord.Interaction, query: str):
+async def play(interaction: discord.Interaction, query: str, platform: SearchPlatform = SearchPlatform.AUTO):
     if not await music_bot.ensure_voice_channel(interaction):
         return
 
@@ -228,7 +246,7 @@ async def play(interaction: discord.Interaction, query: str):
     if re.match(r'https?://', query):
          players = await YTDLSource.from_url(query, loop=client.loop, stream=True)
     else:
-        players = await YTDLSource.from_search(query, loop=client.loop, stream=True)
+        players = await YTDLSource.from_search(query, loop=client.loop, stream=True, platform=platform)
 
 
     if not players:
