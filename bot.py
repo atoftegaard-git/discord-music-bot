@@ -57,7 +57,7 @@ ytdl_format_options = {
 }
 
 ffmpeg_options = {
-    'options': '-vn'
+    'options': '-vn -fflags nobuffer'
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
@@ -100,7 +100,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
         """Creates a new FFmpegPCMAudio instance from the same URL, optionally seeking to a specific time."""
         options = ffmpeg_options.copy()
         if seek > 0:
-            options['before_options'] = f"-ss {seek}"
+            options['before_options'] = f"-analyzeduration 0 -probesize 32K -ss {seek}"
         
         return self.__class__(discord.FFmpegPCMAudio(self.data['url'], **options), data=self.data)
 
@@ -215,16 +215,20 @@ class MusicBot:
         asyncio.run_coroutine_threadsafe(self.text_channel.send(f"Now playing: **{self.current_song.title}** ({self.current_song.duration_fmt})"), self.bot.loop)
 
     async def seek(self, position: int):
-        if not self.current_song or not self.voice_client.is_playing():
+        if not self.voice_client or not self.voice_client.is_playing() or not self.current_song:
             return
 
-        # Create the new player with the seek option
-        new_player = self.current_song.clone(seek=position)
+        # Store the current volume from the existing source
+        current_volume = self.voice_client.source.volume if self.voice_client.source else 0.5
+
+        # Create a new audio source starting at the given position
+        new_source = self.current_song.clone(seek=position)
         
-        # Stop the current player, wait briefly for the state to update, then play the new source
-        self.voice_client.stop()
-        await asyncio.sleep(0.1) # Small delay to allow the player to fully stop
-        self.voice_client.play(new_player, after=self.play_next)
+        # Set the volume on the new source before replacing
+        new_source.volume = current_volume
+
+        # Replace the currently playing source with the new one
+        self.voice_client.source = new_source
 
     def jump(self, position: int) -> bool:
         if not self.queue or not (1 <= position <= len(self.queue)):
