@@ -456,6 +456,18 @@ async def jump(interaction: discord.Interaction, position: int):
         await interaction.response.send_message(f"Invalid position. The queue currently has {len(music_bot.queue)} songs.", ephemeral=True)
 
 
+@tree.command(name="remove", description="Removes a song from the queue.")
+@app_commands.describe(position="The position of the song to remove from the queue.")
+@log_command
+async def remove(interaction: discord.Interaction, position: int):
+    if not music_bot.queue or not (1 <= position <= len(music_bot.queue)):
+        await interaction.response.send_message("Invalid position.", ephemeral=True)
+        return
+        
+    removed_song = music_bot.queue.pop(position - 1)
+    await interaction.response.send_message(f"Removed **{removed_song.title}** from the queue.")
+
+
 @tree.command(name="skip", description="Skips the current song")
 @log_command
 async def skip(interaction: discord.Interaction):
