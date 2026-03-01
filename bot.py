@@ -93,9 +93,13 @@ class YTDLSource(discord.PCMVolumeTransformer):
             return f"{hours:02}:{minutes:02}:{seconds:02}"
         return f"{minutes:02}:{seconds:02}"
 
-    def clone(self):
-        """Creates a new FFmpegPCMAudio instance from the same URL."""
-        return self.__class__(discord.FFmpegPCMAudio(self.data['url'], **ffmpeg_options), data=self.data)
+    def clone(self, seek: int = 0):
+        """Creates a new FFmpegPCMAudio instance from the same URL, optionally seeking to a specific time."""
+        options = ffmpeg_options.copy()
+        if seek > 0:
+            options['before_options'] = f"-ss {seek}"
+        
+        return self.__class__(discord.FFmpegPCMAudio(self.data['url'], **options), data=self.data)
 
     @classmethod
     async def from_search(cls, query, *, loop=None, stream=False, platform: SearchPlatform = SearchPlatform.AUTO):
@@ -182,6 +186,10 @@ class MusicBot:
     def play_next(self, error=None):
         if error:
             logging.error(f'Player error: {error}', exc_info=True)
+            if isinstance(error, discord.errors.ConnectionClosed):
+                logging.warning("Connection closed, attempting to play next song.")
+                # Try to play the next song
+                return self.play_next()
 
         if self.repeat_mode == RepeatMode.SONG and self.current_song:
             to_play = self.current_song.clone()
@@ -204,6 +212,19 @@ class MusicBot:
         self.voice_client.play(to_play, after=self.play_next)
         asyncio.run_coroutine_threadsafe(self.text_channel.send(f"Now playing: **{self.current_song.title}** ({self.current_song.duration_fmt})"), self.bot.loop)
 
+    async def seek(self, position: int):
+        if not self.current_song:
+            return
+
+        # Stop the current player
+        self.voice_client.stop()
+
+        # Create a new player with the seek option
+        new_player = self.current_song.clone(seek=position)
+        
+        # Play the new player
+        self.voice_client.play(new_player, after=self.play_next)
+
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
@@ -224,19 +245,52 @@ async def play(interaction: discord.Interaction, query: str, platform: SearchPla
     await interaction.response.defer()
 
     if "spotify.com" in query:
-        if spotify:
-            try:
+        if not spotify:
+            await interaction.followup.send("Spotify support is not configured.")
+            return
+        
+        try:
+            if "track" in query:
                 track = spotify.track(query)
                 artist = track['artists'][0]['name']
                 title = track['name']
                 query = f"{artist} - {title}"
-                logging.info(f"Spotify URL detected. Searching for '{query}' on YouTube.")
-            except Exception as e:
-                logging.error(f"Failed to get track info from Spotify URL: {e}")
-                await interaction.followup.send("Failed to get track info from Spotify.")
+                logging.info(f"Spotify track URL detected. Searching for '{query}' on YouTube.")
+            elif "playlist" in query:
+                results = spotify.playlist_tracks(query)
+                tracks = results['items']
+                
+                # Handle paginated results
+                while results['next']:
+                    results = spotify.next(results)
+                    tracks.extend(results['items'])
+
+                if not tracks:
+                    await interaction.followup.send("Could not find any tracks in the playlist.")
+                    return
+
+                await interaction.followup.send(f"Adding {len(tracks)} songs from the playlist to the queue...")
+
+                for item in tracks:
+                    track = item['track']
+                    if track:
+                        artist = track['artists'][0]['name']
+                        title = track['name']
+                        search_query = f"{artist} - {title}"
+                        
+                        # We are searching for each song individually, so we can't use the normal play flow
+                        players = await YTDLSource.from_search(search_query, loop=client.loop, stream=True)
+                        if players:
+                            music_bot.queue.extend(players)
+                            if not music_bot.voice_client.is_playing() and not music_bot.voice_client.is_paused():
+                                music_bot.play_next()
+                
+                await interaction.channel.send(f"Finished adding playlist to the queue.")
                 return
-        else:
-            await interaction.followup.send("Spotify support is not configured.")
+
+        except Exception as e:
+            logging.error(f"Failed to process Spotify URL: {e}", exc_info=True)
+            await interaction.followup.send("Failed to process Spotify URL.")
             return
 
     # If the user provides a youtube link with a playlist, only play the video
@@ -284,6 +338,34 @@ async def spil(interaction: discord.Interaction):
     embed.set_image(url=gif_url)
 
     await interaction.response.send_message(content=f"{interaction.user.mention}", embed=embed)
+
+
+@tree.command(name="seek", description="Seeks to a specific time in the current song.")
+@app_commands.describe(timestamp="The time to seek to (e.g., 01:32 or 1:32:05).")
+@log_command
+async def seek(interaction: discord.Interaction, timestamp: str):
+    if not music_bot.current_song:
+        await interaction.response.send_message("Not playing any song.", ephemeral=True)
+        return
+
+    try:
+        parts = list(map(int, timestamp.split(':')))
+        if len(parts) > 3:
+            raise ValueError("Invalid timestamp format.")
+        
+        seconds = 0
+        for i, part in enumerate(reversed(parts)):
+            seconds += part * (60**i)
+
+        if seconds > music_bot.current_song.duration:
+            await interaction.response.send_message("Cannot seek beyond the song's duration.", ephemeral=True)
+            return
+
+        await music_bot.seek(seconds)
+        await interaction.response.send_message(f"Seeked to {timestamp}.")
+
+    except ValueError:
+        await interaction.response.send_message("Invalid timestamp format. Please use HH:MM:SS, MM:SS, or SS.", ephemeral=True)
 
 
 @tree.command(name="skip", description="Skips the current song")
