@@ -10,6 +10,7 @@ from spotipy.oauth2 import SpotifyClientCredentials
 import re
 from dotenv import load_dotenv
 from enum import Enum
+import random
 
 load_dotenv()
 
@@ -50,7 +51,9 @@ ytdl_format_options = {
     'quiet': True,
     'no_warnings': True,
     'default_search': 'ytsearch',  # Default to YouTube search
-    'source_address': '0.0.0.0'  # bind to ipv4 since ipv6 addresses cause issues sometimes
+    'source_address': '0.0.0.0',  # bind to ipv4 since ipv6 addresses cause issues sometimes
+    'ignoreconfig': True,
+    'no_cachedir': True
 }
 
 ffmpeg_options = {
@@ -172,6 +175,7 @@ class MusicBot:
         self.voice_client = None
         self.text_channel = None
         self.repeat_mode = RepeatMode.NONE
+        self.seek_event = asyncio.Event()
 
     async def ensure_voice_channel(self, interaction: discord.Interaction):
         if self.voice_client is None:
@@ -184,11 +188,15 @@ class MusicBot:
         return True
 
     def play_next(self, error=None):
+        if self.seek_event.is_set():
+            # This is a seek operation, the seek method will handle the next play
+            self.seek_event.clear()
+            return
+
         if error:
             logging.error(f'Player error: {error}', exc_info=True)
             if isinstance(error, discord.errors.ConnectionClosed):
                 logging.warning("Connection closed, attempting to play next song.")
-                # Try to play the next song
                 return self.play_next()
 
         if self.repeat_mode == RepeatMode.SONG and self.current_song:
@@ -213,17 +221,44 @@ class MusicBot:
         asyncio.run_coroutine_threadsafe(self.text_channel.send(f"Now playing: **{self.current_song.title}** ({self.current_song.duration_fmt})"), self.bot.loop)
 
     async def seek(self, position: int):
-        if not self.current_song:
+        if not self.current_song or not self.voice_client.is_playing():
             return
 
-        # Stop the current player
-        self.voice_client.stop()
-
-        # Create a new player with the seek option
+        # Set the event to signal that a seek is in progress
+        self.seek_event.set()
+        
+        # Create the new player before stopping, to ensure data is ready
         new_player = self.current_song.clone(seek=position)
         
-        # Play the new player
+        # Stop the current player. The `after` function (`play_next`) will see the event and do nothing.
+        self.voice_client.stop()
+        
+        # Play the new player.
         self.voice_client.play(new_player, after=self.play_next)
+        # The event is cleared inside play_next, but as a fallback, ensure it's cleared if play_next is slow
+        if self.seek_event.is_set():
+             self.seek_event.clear()
+
+    def jump(self, position: int) -> bool:
+        if not self.queue or not (1 <= position <= len(self.queue)):
+            return False
+
+        # The queue is 0-indexed, user position is 1-indexed
+        target_index = position - 1
+
+        # The song that was playing is now gone. The queue becomes
+        # the song at the target position and everything after it.
+        self.queue = self.queue[target_index:]
+
+        # If a song is currently playing, stop it. The `after` callback (`play_next`)
+        # will then play the song that is now at the start of the modified queue.
+        if self.voice_client and self.voice_client.is_playing():
+            self.voice_client.stop()
+        else:
+            # If nothing was playing, we need to manually trigger the next song.
+            self.play_next()
+        
+        return True
 
 
 intents = discord.Intents.default()
@@ -244,6 +279,7 @@ async def play(interaction: discord.Interaction, query: str, platform: SearchPla
 
     await interaction.response.defer()
 
+    # --- Spotify URL Handling ---
     if "spotify.com" in query:
         if not spotify:
             await interaction.followup.send("Spotify support is not configured.")
@@ -256,43 +292,72 @@ async def play(interaction: discord.Interaction, query: str, platform: SearchPla
                 title = track['name']
                 query = f"{artist} - {title}"
                 logging.info(f"Spotify track URL detected. Searching for '{query}' on YouTube.")
+
             elif "playlist" in query:
+                await interaction.followup.send("Fetching playlist from Spotify...")
                 results = spotify.playlist_tracks(query)
                 tracks = results['items']
                 
-                # Handle paginated results
+                # Handle paginated results from Spotify API
                 while results['next']:
                     results = spotify.next(results)
                     tracks.extend(results['items'])
 
                 if not tracks:
-                    await interaction.followup.send("Could not find any tracks in the playlist.")
+                    await interaction.edit_original_response(content="Could not find any tracks in that playlist.")
                     return
 
-                await interaction.followup.send(f"Adding {len(tracks)} songs from the playlist to the queue...")
+                # This function will run in the background
+                async def add_playlist_songs_bg(initial_interaction: discord.Interaction):
+                    search_tasks = []
+                    for item in tracks:
+                        track = item['track']
+                        if track:
+                            artist = track['artists'][0]['name']
+                            title = track['name']
+                            search_query = f"{artist} - {title}"
+                            task = YTDLSource.from_search(search_query, loop=client.loop, stream=True, platform=SearchPlatform.YOUTUBE)
+                            search_tasks.append(task)
+                    
+                    # If the queue is empty, find and play the first song immediately
+                    if not music_bot.voice_client.is_playing() and not music_bot.voice_client.is_paused():
+                        if search_tasks:
+                            first_song_result = await search_tasks.pop(0)
+                            if first_song_result:
+                                music_bot.current_song = first_song_result[0]
+                                music_bot.voice_client.play(music_bot.current_song.clone(), after=music_bot.play_next)
+                                await initial_interaction.edit_original_response(content=f"Now playing: **{music_bot.current_song.title}** ({music_bot.current_song.duration_fmt})\n*Adding the rest of the playlist to the queue in the background...*")
 
-                for item in tracks:
-                    track = item['track']
-                    if track:
-                        artist = track['artists'][0]['name']
-                        title = track['name']
-                        search_query = f"{artist} - {title}"
-                        
-                        # We are searching for each song individually, so we can't use the normal play flow
-                        players = await YTDLSource.from_search(search_query, loop=client.loop, stream=True)
-                        if players:
-                            music_bot.queue.extend(players)
-                            if not music_bot.voice_client.is_playing() and not music_bot.voice_client.is_paused():
-                                music_bot.play_next()
-                
-                await interaction.channel.send(f"Finished adding playlist to the queue.")
+                    # Process the rest of the songs concurrently
+                    search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+
+                    all_players = []
+                    failed_count = 0
+                    for result in search_results:
+                        if isinstance(result, list) and result:
+                            all_players.extend(result)
+                        else:
+                            failed_count += 1
+                            if isinstance(result, Exception):
+                                logging.warning(f"A song search failed during concurrent playlist processing: {result}")
+
+                    music_bot.queue.extend(all_players)
+                    
+                    final_message = f"Finished adding {len(all_players)} more songs to the queue."
+                    if failed_count > 0:
+                        final_message += f" ({failed_count} songs failed to load)."
+                    await initial_interaction.channel.send(final_message)
+
+                # Start the background task
+                client.loop.create_task(add_playlist_songs_bg(interaction))
                 return
 
         except Exception as e:
             logging.error(f"Failed to process Spotify URL: {e}", exc_info=True)
-            await interaction.followup.send("Failed to process Spotify URL.")
+            await interaction.edit_original_response(content="An error occurred while processing the Spotify URL.")
             return
 
+    # --- Standard URL or Search Query Handling ---
     # If the user provides a youtube link with a playlist, only play the video
     if 'youtube.com/watch' in query and '&list=' in query:
         query = query.split('&list=')[0]
@@ -302,22 +367,24 @@ async def play(interaction: discord.Interaction, query: str, platform: SearchPla
     else:
         players = await YTDLSource.from_search(query, loop=client.loop, stream=True, platform=platform)
 
-
     if not players:
-        await interaction.followup.send('Could not find any songs to play.')
+        await interaction.edit_original_response(content='Could not find any songs to play.')
         return
 
     if music_bot.voice_client.is_playing() or music_bot.voice_client.is_paused() or music_bot.queue:
         music_bot.queue.extend(players)
         if len(players) > 1:
-            await interaction.followup.send(f'Added {len(players)} songs to the queue.')
+            await interaction.edit_original_response(content=f'Added {len(players)} songs to the queue.')
         else:
-            await interaction.followup.send(f'Added to queue: **{players[0].title}**')
+            await interaction.edit_original_response(content=f'Added to queue: **{players[0].title}**')
     else:
+        # If the queue was empty, start playing the first song
         music_bot.current_song = players.pop(0)
         music_bot.queue.extend(players)
         music_bot.voice_client.play(music_bot.current_song.clone(), after=music_bot.play_next)
-        await interaction.followup.send(f"Now playing: **{music_bot.current_song.title}** ({music_bot.current_song.duration_fmt})")
+        await interaction.edit_original_response(content=f"Now playing: **{music_bot.current_song.title}** ({music_bot.current_song.duration_fmt})")
+
+
 
 
 @tree.command(name="repeat", description="Sets the repeat mode.")
@@ -368,6 +435,27 @@ async def seek(interaction: discord.Interaction, timestamp: str):
         await interaction.response.send_message("Invalid timestamp format. Please use HH:MM:SS, MM:SS, or SS.", ephemeral=True)
 
 
+@tree.command(name="shuffle", description="Shuffles the current song queue.")
+@log_command
+async def shuffle(interaction: discord.Interaction):
+    if not music_bot.queue:
+        await interaction.response.send_message("The queue is empty, nothing to shuffle.", ephemeral=True)
+        return
+    
+    random.shuffle(music_bot.queue)
+    await interaction.response.send_message("The queue has been shuffled!")
+
+
+@tree.command(name="jump", description="Jumps to a specific song in the queue.")
+@app_commands.describe(position="The position of the song to jump to in the queue.")
+@log_command
+async def jump(interaction: discord.Interaction, position: int):
+    if music_bot.jump(position):
+        await interaction.response.send_message(f"Jumped to position **{position}** in the queue.")
+    else:
+        await interaction.response.send_message(f"Invalid position. The queue currently has {len(music_bot.queue)} songs.", ephemeral=True)
+
+
 @tree.command(name="skip", description="Skips the current song")
 @log_command
 async def skip(interaction: discord.Interaction):
@@ -388,20 +476,117 @@ async def stop(interaction: discord.Interaction):
     await interaction.response.send_message("Stopped the music and cleared the queue.")
 
 
-@tree.command(name="queue", description="Shows the current song queue")
+class QueuePaginator(discord.ui.View):
+    def __init__(self, interaction: discord.Interaction, queue, current_song, music_bot):
+        super().__init__(timeout=120)
+        self.interaction = interaction
+        self.queue = queue
+        self.current_song = current_song
+        self.music_bot = music_bot
+        self.current_page = 0
+        self.songs_per_page = 10
+        self.total_pages = -(-len(self.queue) // self.songs_per_page) if self.queue else 1
+
+        # Disable buttons based on initial state
+        self.previous_page.disabled = self.current_page == 0
+        self.next_page.disabled = self.total_pages <= 1
+        self.shuffle_queue.disabled = not self.queue
+        self.skip_song.disabled = not self.current_song
+        self.stop_playback.disabled = not self.current_song
+
+    async def on_timeout(self):
+        # Remove buttons on timeout
+        message = await self.interaction.original_response()
+        await message.edit(view=None)
+
+    async def create_embed_for_page(self):
+        embed = discord.Embed(title="Song Queue", color=discord.Color.blurple())
+
+        if self.current_song:
+            embed.add_field(name="Now Playing", value=f"**{self.current_song.title}** ({self.current_song.duration_fmt})", inline=False)
+        
+        if not self.queue:
+            embed.description = "The queue is empty."
+        else:
+            start_index = self.current_page * self.songs_per_page
+            end_index = start_index + self.songs_per_page
+            queue_slice = self.queue[start_index:end_index]
+
+            queue_text = ""
+            for i, song in enumerate(queue_slice, start=start_index + 1):
+                queue_text += f"`{i}.` {song.title}\n"
+            
+            if queue_text:
+                embed.add_field(name="Up Next", value=queue_text, inline=False)
+        
+        if self.total_pages > 1:
+            embed.set_footer(text=f"Page {self.current_page + 1}/{self.total_pages}")
+            
+        return embed
+
+    async def update_view(self, interaction: discord.Interaction):
+        # Defer the interaction response to prevent timeouts
+        await interaction.response.defer()
+
+        # Update button states
+        self.previous_page.disabled = self.current_page == 0
+        self.next_page.disabled = self.current_page >= self.total_pages - 1
+        self.shuffle_queue.disabled = not self.queue
+
+        embed = await self.create_embed_for_page()
+        await interaction.edit_original_response(embed=embed, view=self)
+
+    @discord.ui.button(label="<<", style=discord.ButtonStyle.primary, row=0)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page -= 1
+        await self.update_view(interaction)
+
+    @discord.ui.button(label=">>", style=discord.ButtonStyle.primary, row=0)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page += 1
+        await self.update_view(interaction)
+        
+    @discord.ui.button(label="Shuffle", style=discord.ButtonStyle.secondary, row=1)
+    async def shuffle_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.queue:
+            random.shuffle(self.queue)
+            # Defer and then update the view
+            await self.update_view(interaction)
+            await interaction.followup.send("Queue shuffled!", ephemeral=True)
+        else:
+            await interaction.response.send_message("Nothing to shuffle.", ephemeral=True)
+
+    @discord.ui.button(label="Skip", style=discord.ButtonStyle.secondary, row=1)
+    async def skip_song(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.music_bot.voice_client and self.music_bot.voice_client.is_playing():
+            self.music_bot.voice_client.stop()
+            await interaction.response.send_message("Song skipped.", ephemeral=True)
+            # Stop the view since the queue state is now different
+            self.stop()
+        else:
+            await interaction.response.send_message("Not playing any song.", ephemeral=True)
+
+    @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, row=1)
+    async def stop_playback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.music_bot.queue.clear()
+        if self.music_bot.voice_client:
+            self.music_bot.voice_client.stop()
+        self.music_bot.current_song = None
+        await interaction.response.send_message("Playback stopped and queue cleared.", ephemeral=True)
+        self.stop()
+
+
+@tree.command(name="queue", description="Shows the current song queue with interactive pages.")
 @log_command
 async def queue(interaction: discord.Interaction):
-    if music_bot.current_song or music_bot.queue:
-        queue_list = ""
-        if music_bot.current_song:
-            queue_list += f"**Now Playing:** {music_bot.current_song.title}\n\n"
-        if music_bot.queue:
-            queue_list += "**Up Next:**\n"
-            for i, song in enumerate(music_bot.queue):
-                queue_list += f"{i+1}. {song.title}\n"
-        await interaction.response.send_message(queue_list)
-    else:
+    if not music_bot.current_song and not music_bot.queue:
         await interaction.response.send_message('The queue is empty.', ephemeral=True)
+        return
+
+    view = QueuePaginator(interaction, music_bot.queue, music_bot.current_song, music_bot)
+    embed = await view.create_embed_for_page()
+
+    await interaction.response.send_message(embed=embed, view=view)
 
 
 @tree.command(name="clear", description="Clears the queue")
