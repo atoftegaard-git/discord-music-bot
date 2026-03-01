@@ -225,7 +225,7 @@ class MusicBot:
         except Exception as e:
             logging.error(f"Failed to save queue: {e}")
 
-    async def load_queue(self):
+    async def _load_queue_on_startup(self):
         # Only load from file if the in-memory queue is currently empty
         if self.queue or self.current_song:
             return
@@ -243,7 +243,7 @@ class MusicBot:
         if not urls:
             return
 
-        logging.info(f"Loading {len(urls)} songs from persisted queue...")
+        logging.info(f"Loading {len(urls)} songs from persisted queue on startup...")
         
         restored_songs = []
         for url in urls:
@@ -256,6 +256,41 @@ class MusicBot:
         
         self.queue.extend(restored_songs)
         logging.info(f"Restored {len(restored_songs)} songs to the queue.")
+
+    async def _process_urls_bg(self, urls):
+        logging.info(f"Starting background restore of {len(urls)} songs.")
+        
+        restored_songs = []
+        for url in urls:
+            try:
+                players = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
+                if players:
+                    restored_songs.extend(players)
+            except Exception as e:
+                logging.error(f"Failed to restore song from URL '{url}' during background load: {e}")
+        
+        self.queue.extend(restored_songs)
+        self._save_queue()
+        logging.info(f"Finished background restore of {len(restored_songs)} songs.")
+        if self.text_channel:
+            await self.text_channel.send(f"✅ Finished restoring {len(restored_songs)} songs to the queue.")
+
+    def start_background_load(self):
+        """
+        Synchronously reads the queue file and starts a background task to process it.
+        This avoids a race condition where the queue file could be overwritten before being read.
+        """
+        if not self.persist_queue or not os.path.exists(self.queue_file):
+            return
+        
+        try:
+            with open(self.queue_file, 'r') as f:
+                urls = json.load(f)
+        except Exception:
+            urls = []
+
+        if urls:
+            self.bot.loop.create_task(self._process_urls_bg(urls))
 
     async def ensure_voice_channel(self, interaction: discord.Interaction):
         if self.voice_client is None:
@@ -353,9 +388,6 @@ async def play(interaction: discord.Interaction, query: str, platform: SearchPla
 
     await interaction.response.defer()
 
-    # If the in-memory queue is empty, try to load it from the persisted file
-    await music_bot.load_queue()
-
     # --- Spotify URL Handling ---
     if "spotify.com" in query:
         if not spotify:
@@ -451,25 +483,43 @@ async def play(interaction: discord.Interaction, query: str, platform: SearchPla
         await interaction.edit_original_response(content='Could not find any songs to play.')
         return
 
-    # Add new songs to the queue and save it
+    # --- Logic to handle queueing and starting playback ---
+
+    # Check if we should start a background load.
+    # This is true if the bot isn't playing and the in-memory queue is empty.
+    should_bg_load = (
+        music_bot.voice_client and
+        not music_bot.voice_client.is_playing() and
+        not music_bot.voice_client.is_paused() and
+        not music_bot.queue and not music_bot.current_song and
+        music_bot.persist_queue and
+        os.path.exists(music_bot.queue_file)
+    )
+
+    if should_bg_load:
+        # This reads the file and starts the background processing task
+        await interaction.followup.send("⏳ Loading persistent queue in the background...", ephemeral=True)
+        music_bot.start_background_load()
+
+    # Add the new song(s) to the in-memory queue and save the new state.
     music_bot.queue.extend(players)
     music_bot._save_queue()
 
     # Announce what was added, then start playback if not already active
     if music_bot.voice_client and not music_bot.voice_client.is_playing() and not music_bot.voice_client.is_paused():
         # Not playing, so start the queue.
-        # We need a different message since play_next will send the "Now playing" message.
+        # play_next() will send the "Now playing" message.
         if len(players) > 1:
-            await interaction.edit_original_response(content=f'Added {len(players)} songs to the queue. Starting playback...')
+            await interaction.followup.send(content=f'Added {len(players)} songs to the queue. Starting playback...')
         else:
-            await interaction.edit_original_response(content=f'Added to queue: **{players[0].title}**. Starting playback...')
+            await interaction.followup.send(content=f'Added to queue: **{players[0].title}**. Starting playback...')
         music_bot.play_next()
     else:
         # Already playing, just confirm the addition
         if len(players) > 1:
-            await interaction.edit_original_response(content=f'Added {len(players)} songs to the queue.')
+            await interaction.followup.send(content=f'Added {len(players)} songs to the queue.')
         else:
-            await interaction.edit_original_response(content=f'Added to queue: **{players[0].title}**')
+            await interaction.followup.send(content=f'Added to queue: **{players[0].title}**')
 
 
 
@@ -694,14 +744,16 @@ class QueuePaginator(discord.ui.View):
 @tree.command(name="queue", description="Shows the current song queue with interactive pages.")
 @log_command
 async def queue(interaction: discord.Interaction):
+    await interaction.response.defer()
+
     if not music_bot.current_song and not music_bot.queue:
-        await interaction.response.send_message('The queue is empty.', ephemeral=True)
+        await interaction.followup.send('The queue is empty.', ephemeral=True)
         return
 
     view = QueuePaginator(interaction, music_bot.queue, music_bot.current_song, music_bot)
     embed = await view.create_embed_for_page()
 
-    await interaction.response.send_message(embed=embed, view=view)
+    await interaction.followup.send(embed=embed, view=view)
 
 
 @tree.command(name="clear", description="Clears the queue")
@@ -759,7 +811,7 @@ async def on_ready():
         await tree.sync()
         logging.info('Synced commands globally.')
     
-    await music_bot.load_queue()
+    await music_bot._load_queue_on_startup()
     logging.info(f'Logged in as {client.user} (ID: {client.user.id})')
     logging.info('------')
 
