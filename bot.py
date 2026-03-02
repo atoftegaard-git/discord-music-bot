@@ -117,29 +117,13 @@ class YTDLSource(discord.PCMVolumeTransformer):
             logging.info(f"Searching on SoundCloud for: '{query}'")
             return await cls.from_url(f"scsearch:{query}", loop=loop, stream=stream, timeout=timeout)
 
-        # Prioritized search (auto)
-        # 1. Spotify
-        if spotify:
-            try:
-                result = spotify.search(q=query, type='track', limit=1)
-                if result and result['tracks']['items']:
-                    track = result['tracks']['items'][0]
-                    artist = track['artists'][0]['name']
-                    title = track['name']
-                    search_query = f"{artist} - {title}"
-                    logging.info(f"Found on Spotify: '{search_query}'. Searching on YouTube.")
-                    return await cls.from_url(f"ytsearch:{search_query}", loop=loop, stream=stream, timeout=timeout)
-            except Exception as e:
-                logging.error(f"Spotify search failed: {e}")
-
-        # 2. YouTube
-        logging.info(f"Searching on YouTube for: '{query}'")
+        # AUTO platform logic (default)
+        logging.info(f"Searching on YouTube for: '{query}' (AUTO fallback)")
         results = await cls.from_url(f"ytsearch:{query}", loop=loop, stream=stream, timeout=timeout)
         if results:
             return results
 
-        # 3. SoundCloud
-        logging.info(f"Searching on SoundCloud for: '{query}'")
+        logging.info(f"Searching on SoundCloud for: '{query}' (AUTO fallback)")
         return await cls.from_url(f"scsearch:{query}", loop=loop, stream=stream, timeout=timeout)
 
 
@@ -376,13 +360,7 @@ tree = app_commands.CommandTree(client)
 music_bot = MusicBot(client)
 
 
-@tree.command(name="play", description="Plays a song from a URL or search query")
-@app_commands.describe(
-    query="The song URL or search query.",
-    platform="The platform to search first (defaults to auto)."
-)
-@log_command
-async def play(interaction: discord.Interaction, query: str, platform: SearchPlatform = SearchPlatform.AUTO):
+async def _play_logic(interaction: discord.Interaction, query: str):
     if not await music_bot.ensure_voice_channel(interaction):
         return
 
@@ -477,7 +455,7 @@ async def play(interaction: discord.Interaction, query: str, platform: SearchPla
     if re.match(r'https?://', query):
          players = await YTDLSource.from_url(query, loop=client.loop, stream=True)
     else:
-        players = await YTDLSource.from_search(query, loop=client.loop, stream=True, platform=platform)
+        players = await YTDLSource.from_search(query, loop=client.loop, stream=True, platform=SearchPlatform.AUTO)
 
     if not players:
         await interaction.edit_original_response(content='Could not find any songs to play.')
@@ -522,6 +500,53 @@ async def play(interaction: discord.Interaction, query: str, platform: SearchPla
             await interaction.followup.send(content=f'Added to queue: **{players[0].title}**')
 
 
+@tree.command(name="play", description="Plays a song from a URL or search query")
+@app_commands.describe(
+    query="The song URL or search query."
+)
+@log_command
+async def play(interaction: discord.Interaction, query: str):
+    await _play_logic(interaction, query)
+
+
+@tree.command(name="youtube", description="Searches and plays a song from YouTube.")
+@app_commands.describe(query="The search query.")
+@log_command
+async def youtube(interaction: discord.Interaction, query: str):
+    await _play_logic(interaction, query, SearchPlatform.YOUTUBE)
+
+
+@tree.command(name="soundcloud", description="Searches and plays a song from SoundCloud.")
+@app_commands.describe(query="The search query.")
+@log_command
+async def soundcloud(interaction: discord.Interaction, query: str):
+    await _play_logic(interaction, query, SearchPlatform.SOUNDCLOUD)
+
+
+@tree.command(name="spotify", description="Searches Spotify for a track and plays it from YouTube.")
+@app_commands.describe(query="The search query.")
+@log_command
+async def spotify_command(interaction: discord.Interaction, query: str):
+    if not spotify:
+        await interaction.response.send_message("Spotify support is not configured.", ephemeral=True)
+        return
+    
+    await interaction.response.defer()
+
+    try:
+        result = spotify.search(q=query, type='track', limit=1)
+        if result and result['tracks']['items']:
+            track = result['tracks']['items'][0]
+            artist = track['artists'][0]['name']
+            title = track['name']
+            spotify_youtube_query = f"{artist} - {title}"
+            logging.info(f"Found on Spotify: '{spotify_youtube_query}'. Passing to _play_logic for YouTube search.")
+            await _play_logic(interaction, spotify_youtube_query, SearchPlatform.YOUTUBE)
+        else:
+            await interaction.edit_original_response(content=f"Could not find any results for '{query}' on Spotify.")
+    except Exception as e:
+        logging.error(f"Spotify search for '{query}' failed: {e}", exc_info=True)
+        await interaction.edit_original_response(content="An error occurred while searching Spotify.")
 
 
 @tree.command(name="repeat", description="Sets the repeat mode.")
