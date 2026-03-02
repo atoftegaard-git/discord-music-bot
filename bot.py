@@ -162,6 +162,7 @@ class MusicBot:
 
         self.autodisconnect_task = None
         self.empty_since = None
+        self.loader_semaphore = asyncio.Semaphore(10)
 
         self.data_dir = "/data"
         os.makedirs(self.data_dir, exist_ok=True)
@@ -273,12 +274,13 @@ class MusicBot:
         except Exception as e:
             logging.error(f"Failed to save queue: {e}")
 
+    async def _load_url_with_semaphore(self, url: str):
+        async with self.loader_semaphore:
+            return await YTDLSource.from_url(url, loop=self.bot.loop, stream=True, timeout=20.0)
+
     async def _concurrent_load_urls(self, urls: list) -> tuple[list, int]:
         """Takes a list of URLs and loads them concurrently."""
-        tasks = [
-            YTDLSource.from_url(url, loop=self.bot.loop, stream=True, timeout=20.0)
-            for url in urls
-        ]
+        tasks = [self._load_url_with_semaphore(url) for url in urls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         loaded_songs = []
