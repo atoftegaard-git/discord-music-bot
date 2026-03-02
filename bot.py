@@ -970,6 +970,56 @@ async def leave(interaction: discord.Interaction):
         await music_bot.voice_client.disconnect()
 
 
+
+@tree.command(name="reset_commands", description="Resets the slash commands on the discord server")
+@app_commands.describe(scope="The scope of the reset (guild or global)")
+@app_commands.choices(scope=[
+    app_commands.Choice(name="guild", value="guild"),
+    app_commands.Choice(name="global", value="global"),
+])
+@log_command
+async def reset_commands(interaction: discord.Interaction, scope: str, guild_id: str = None):
+    """Resets the slash commands on the discord server."""
+    app_info = await client.application_info()
+    if interaction.user.id != app_info.owner.id:
+        await interaction.response.send_message("You are not authorized to use this command.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    if scope == "guild":
+        target_guild_id = None
+        if guild_id:
+            target_guild_id = int(guild_id)
+        elif os.getenv("GUILD_ID"):
+            target_guild_id = int(os.getenv("GUILD_ID"))
+        elif interaction.guild:
+            target_guild_id = interaction.guild.id
+
+        if not target_guild_id:
+            await interaction.followup.send("Could not determine the target guild. Please provide a guild_id or set GUILD_ID in your .env file.", ephemeral=True)
+            return
+
+        guild = discord.Object(id=target_guild_id)
+        logging.info(f"Clearing commands for guild {target_guild_id}...")
+        tree.clear_commands(guild=guild)
+        await tree.sync(guild=guild)
+        logging.info(f"Re-syncing commands for guild {target_guild_id}...")
+        tree.copy_global_to(guild=guild)
+        await tree.sync(guild=guild)
+        await interaction.followup.send(f"Commands for guild `{target_guild_id}` have been reset.")
+
+    elif scope == "global":
+        logging.info("Clearing all global commands...")
+        tree.clear_commands(guild=None)
+        await tree.sync()
+        logging.info("Re-syncing global commands...")
+        await tree.sync()
+        await interaction.followup.send("Global commands have been reset.")
+    else:
+        await interaction.followup.send("Invalid scope. Please choose 'guild' or 'global'.", ephemeral=True)
+
+
 @client.event
 async def on_ready():
     if os.getenv('CLEAR_GLOBALS') == 'true':
