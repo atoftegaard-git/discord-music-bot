@@ -182,11 +182,11 @@ class MusicBot:
                 # Filter out bots from member list
                 human_members = [m for m in self.voice_client.channel.members if not m.bot]
 
-                if not human_members:
+                if not human_members and not self.voice_client.is_playing():
                     # We are alone with other bots, or completely alone
                     if self.empty_since is None:
                         self.empty_since = asyncio.get_event_loop().time()
-                        logging.info(f"Voice channel is empty of users. Starting {disconnect_delay}s disconnect timer.")
+                        logging.info(f"Voice channel is empty and not playing. Starting {disconnect_delay}s disconnect timer.")
 
                     elapsed = asyncio.get_event_loop().time() - self.empty_since
                     if elapsed >= disconnect_delay:
@@ -199,7 +199,7 @@ class MusicBot:
                 else:
                     # Humans are present, reset timer if it was running
                     if self.empty_since is not None:
-                        logging.info("Users have returned to the voice channel. Cancelling disconnect timer.")
+                        logging.info("Users have returned or playback started. Cancelling disconnect timer.")
                         self.empty_since = None
             except Exception as e:
                 logging.error(f"An unexpected error occurred in the auto-disconnect task: {e}", exc_info=True)
@@ -273,6 +273,27 @@ class MusicBot:
         except Exception as e:
             logging.error(f"Failed to save queue: {e}")
 
+    async def _concurrent_load_urls(self, urls: list) -> tuple[list, int]:
+        """Takes a list of URLs and loads them concurrently."""
+        tasks = [
+            YTDLSource.from_url(url, loop=self.bot.loop, stream=True, timeout=20.0)
+            for url in urls
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        loaded_songs = []
+        failed_count = 0
+        for result in results:
+            if isinstance(result, list) and result:
+                loaded_songs.extend(result)
+            else:
+                failed_count += 1
+                if isinstance(result, Exception):
+                    # Log the specific exception, but don't dump the whole stack trace to avoid spam
+                    logging.warning(f"Failed to load a song during concurrent load: {result}")
+
+        return loaded_songs, failed_count
+
     async def _load_queue_on_startup(self):
         # Only load from file if the in-memory queue is currently empty
         if self.queue or self.current_song:
@@ -303,36 +324,29 @@ class MusicBot:
             return
 
         logging.info(f"Loading {len(urls)} songs from persisted queue on startup...")
-
-        restored_songs = []
-        for url in urls:
-            try:
-                players = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True, timeout=20.0)
-                if players:
-                    restored_songs.extend(players)
-            except Exception as e:
-                logging.error(f"Failed to restore song from URL '{url}': {e}")
-
+        
+        restored_songs, failed_count = await self._concurrent_load_urls(urls)
+        
         self.queue.extend(restored_songs)
+        
         logging.info(f"Restored {len(restored_songs)} songs to the queue.")
+        if failed_count > 0:
+            logging.warning(f"{failed_count} songs from the persisted queue failed to load.")
 
     async def _process_urls_bg(self, urls):
         logging.info(f"Starting background restore of {len(urls)} songs.")
-
-        restored_songs = []
-        for url in urls:
-            try:
-                players = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
-                if players:
-                    restored_songs.extend(players)
-            except Exception as e:
-                logging.error(f"Failed to restore song from URL '{url}' during background load: {e}")
+        
+        restored_songs, failed_count = await self._concurrent_load_urls(urls)
 
         self.queue.extend(restored_songs)
         self._save_queue()
+        
         logging.info(f"Finished background restore of {len(restored_songs)} songs.")
         if self.text_channel:
-            await self.text_channel.send(f"✅ Finished restoring {len(restored_songs)} songs to the queue.")
+            final_message = f"✅ Finished restoring {len(restored_songs)} songs to the queue."
+            if failed_count > 0:
+                final_message += f" ({failed_count} songs failed to load)."
+            await self.text_channel.send(final_message)
 
     def start_background_load(self):
         """
@@ -388,6 +402,7 @@ class MusicBot:
             self.current_song = None
             asyncio.run_coroutine_threadsafe(self.text_channel.send('Queue finished.'), self.bot.loop)
             if self.repeat_mode != RepeatMode.QUEUE and self.voice_client:
+                logging.info("Queue is empty and repeat is off, disconnecting.")
                 # Disconnect, the on_voice_state_update event will handle cleanup
                 asyncio.run_coroutine_threadsafe(self.voice_client.disconnect(), self.bot.loop)
             return
