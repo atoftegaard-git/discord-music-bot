@@ -59,7 +59,7 @@ ytdl_format_options = {
 }
 
 ffmpeg_options = {
-    'options': '-vn -fflags nobuffer -hide_banner -loglevel quiet'
+    'options': '-vn -fflags nobuffer -hide_banner -loglevel error -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
@@ -395,8 +395,8 @@ class MusicBot:
         to_play = self.current_song.clone()
 
         # Need a valid voice client to play
-        if not self.voice_client:
-            logging.warning("play_next called with no voice client, likely after a disconnect. Aborting play.")
+        if not self.voice_client or not self.voice_client.is_connected():
+            logging.warning("play_next called with no voice client or a disconnected one, likely after a disconnect. Aborting play.")
             # Put the song back at the front of the queue
             self.queue.insert(0, self.current_song)
             self.current_song = None
