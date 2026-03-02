@@ -170,36 +170,39 @@ class MusicBot:
 
         settings = self._load_settings()
         self.persist_queue = settings.get('persist_queue', False)
-        self.prefer_soundcloud = settings.get('prefer_soundcloud', False)
 
     async def _check_autodisconnect(self):
         """Periodically checks if the bot is alone and disconnects after a timeout."""
         disconnect_delay = 300  # 5 minutes
         while self.voice_client and self.voice_client.is_connected():
-            await asyncio.sleep(60) # Check every 20 seconds
+            try:
+                await asyncio.sleep(60) # Check every 20 seconds
 
-            # Filter out bots from member list
-            human_members = [m for m in self.voice_client.channel.members if not m.bot]
+                # Filter out bots from member list
+                human_members = [m for m in self.voice_client.channel.members if not m.bot]
 
-            if not human_members:
-                # We are alone with other bots, or completely alone
-                if self.empty_since is None:
-                    self.empty_since = asyncio.get_event_loop().time()
-                    logging.info(f"Voice channel is empty of users. Starting {disconnect_delay}s disconnect timer.")
+                if not human_members:
+                    # We are alone with other bots, or completely alone
+                    if self.empty_since is None:
+                        self.empty_since = asyncio.get_event_loop().time()
+                        logging.info(f"Voice channel is empty of users. Starting {disconnect_delay}s disconnect timer.")
 
-                elapsed = asyncio.get_event_loop().time() - self.empty_since
-                if elapsed >= disconnect_delay:
-                    logging.info("Disconnecting due to inactivity.")
-                    if self.text_channel:
-                        await self.text_channel.send("Leaving the voice channel due to inactivity.")
-                    await self.voice_client.disconnect()
-                    # After disconnect, the on_voice_state_update will handle cleanup and stop this task
-                    break
-            else:
-                # Humans are present, reset timer if it was running
-                if self.empty_since is not None:
-                    logging.info("Users have returned to the voice channel. Cancelling disconnect timer.")
-                    self.empty_since = None
+                    elapsed = asyncio.get_event_loop().time() - self.empty_since
+                    if elapsed >= disconnect_delay:
+                        logging.info("Disconnecting due to inactivity.")
+                        if self.text_channel:
+                            await self.text_channel.send("Leaving the voice channel due to inactivity.")
+                        await self.voice_client.disconnect()
+                        # After disconnect, the on_voice_state_update will handle cleanup and stop this task
+                        break
+                else:
+                    # Humans are present, reset timer if it was running
+                    if self.empty_since is not None:
+                        logging.info("Users have returned to the voice channel. Cancelling disconnect timer.")
+                        self.empty_since = None
+            except Exception as e:
+                logging.error(f"An unexpected error occurred in the auto-disconnect task: {e}", exc_info=True)
+                await asyncio.sleep(60)
 
     async def handle_disconnect(self):
         """Cleans up resources when the bot disconnects from voice."""
@@ -232,8 +235,7 @@ class MusicBot:
         try:
             with open(self.settings_file, 'w') as f:
                 json.dump({
-                    'persist_queue': self.persist_queue,
-                    'prefer_soundcloud': self.prefer_soundcloud
+                    'persist_queue': self.persist_queue
                 }, f)
         except OSError as e:
             logging.error(f"Failed to save settings: {e}")
@@ -402,6 +404,7 @@ class MusicBot:
 
         self.voice_client.play(to_play, after=self.play_next)
         self._save_queue()
+        logging.info(f"Starting playback of '{self.current_song.title}' from {self.current_song.platform}.")
         asyncio.run_coroutine_threadsafe(self.text_channel.send(f"Now playing: **{self.current_song.title}** ({self.current_song.duration_fmt})"), self.bot.loop)
 
     async def seek(self, position: int):
@@ -450,19 +453,27 @@ music_bot = MusicBot(client)
 
 
 async def _search_with_preference(query: str) -> list | None:
-    """Performs a search on YouTube or SoundCloud based on the bot's preference."""
-    if music_bot.prefer_soundcloud:
-        logging.info(f"Searching SoundCloud first for: '{query}'")
-        players = await YTDLSource.from_search(query, loop=client.loop, stream=True, platform=SearchPlatform.SOUNDCLOUD)
-        if not players:
-            logging.info(f"Not found on SoundCloud, falling back to YouTube for: '{query}'")
-            players = await YTDLSource.from_search(query, loop=client.loop, stream=True, platform=SearchPlatform.YOUTUBE)
-    else: # Default: YouTube first
-        logging.info(f"Searching YouTube first for: '{query}'")
+    """Performs a search on YouTube with retries, then falls back to SoundCloud."""
+    
+    # 1. Try YouTube with retries
+    players = None
+    retries = 3
+    retry_delay = 2 # in seconds
+
+    logging.info(f"Searching YouTube for: '{query}'")
+    for attempt in range(retries):
         players = await YTDLSource.from_search(query, loop=client.loop, stream=True, platform=SearchPlatform.YOUTUBE)
-        if not players:
-            logging.info(f"Not found on YouTube, falling back to SoundCloud for: '{query}'")
-            players = await YTDLSource.from_search(query, loop=client.loop, stream=True, platform=SearchPlatform.SOUNDCLOUD)
+        if players:
+            logging.info(f"Found on YouTube after {attempt + 1} attempt(s).")
+            return players # Found it, so we're done.
+        
+        logging.warning(f"YouTube search attempt {attempt + 1} of {retries} failed. Retrying in {retry_delay}s...")
+        await asyncio.sleep(retry_delay)
+
+    # 2. Fallback to SoundCloud if YouTube fails after all retries
+    logging.info(f"Not found on YouTube after {retries} retries, falling back to SoundCloud for: '{query}'")
+    players = await YTDLSource.from_search(query, loop=client.loop, stream=True, platform=SearchPlatform.SOUNDCLOUD)
+    
     return players
 
 
@@ -682,14 +693,6 @@ async def persist_queue(interaction: discord.Interaction, enabled: bool):
     await interaction.response.send_message(f"Queue persistence has been {status}.")
 
 
-@tree.command(name="prefer_soundcloud", description="Toggle search preference to SoundCloud over YouTube for /play.")
-@app_commands.describe(enabled="Set to True to prefer SoundCloud, False to prefer YouTube.")
-@log_command
-async def prefer_soundcloud(interaction: discord.Interaction, enabled: bool):
-    music_bot.prefer_soundcloud = enabled
-    music_bot._save_settings()
-    preferred_platform = "SoundCloud" if enabled else "YouTube"
-    await interaction.response.send_message(f"Search preference for `/play` set to: **{preferred_platform}**.")
 
 
 
