@@ -146,6 +146,9 @@ class YTDLSource(discord.PCMVolumeTransformer):
             return None
 
 
+QUEUE_FORMAT_VERSION = 1
+
+
 class MusicBot:
     def __init__(self, bot):
         self.bot = bot
@@ -154,8 +157,12 @@ class MusicBot:
         self.voice_client = None
         self.text_channel = None
         self.repeat_mode = RepeatMode.NONE
-        self.settings_file = "settings.json"
-        self.queue_file = "queue.json"
+        
+        self.data_dir = "/data"
+        os.makedirs(self.data_dir, exist_ok=True)
+        
+        self.settings_file = os.path.join(self.data_dir, "settings.json")
+        self.queue_file = os.path.join(self.data_dir, "queue.json")
         
         settings = self._load_settings()
         self.persist_queue = settings.get('persist_queue', False)
@@ -203,8 +210,12 @@ class MusicBot:
         ])
 
         try:
+            queue_data = {
+                "version": QUEUE_FORMAT_VERSION,
+                "urls": urls_to_save
+            }
             with open(self.queue_file, 'w') as f:
-                json.dump(urls_to_save, f)
+                json.dump(queue_data, f)
             logging.info(f"Saved {len(urls_to_save)} songs to {self.queue_file}")
         except Exception as e:
             logging.error(f"Failed to save queue: {e}")
@@ -219,7 +230,18 @@ class MusicBot:
         
         try:
             with open(self.queue_file, 'r') as f:
-                urls = json.load(f)
+                queue_data = json.load(f)
+            
+            urls = []
+            if isinstance(queue_data, dict) and 'version' in queue_data:
+                if queue_data.get('version') == QUEUE_FORMAT_VERSION:
+                    urls = queue_data.get('urls', [])
+                else:
+                    logging.warning(f"Queue file version mismatch! Expected {QUEUE_FORMAT_VERSION}, found {queue_data.get('version')}. Discarding queue.")
+            elif isinstance(queue_data, list): # Handle old format
+                logging.info("Old queue file format detected. Loading as is.")
+                urls = queue_data
+
         except Exception as e:
             logging.error(f"Failed to load queue from file: {e}")
             return
@@ -692,6 +714,40 @@ async def stop(interaction: discord.Interaction):
     music_bot.current_song = None
     await interaction.response.send_message("Stopped the music and cleared the in-memory queue.")
 
+
+@tree.command(name="continue", description="Starts playing from the queue.")
+@log_command
+async def continue_command(interaction: discord.Interaction):
+    if not music_bot.queue and not music_bot.current_song:
+        await interaction.response.send_message("The queue is empty. Nothing to continue.", ephemeral=True)
+        return
+
+    if music_bot.voice_client and music_bot.voice_client.is_playing() and not music_bot.voice_client.is_paused():
+        await interaction.response.send_message("Already playing music.", ephemeral=True)
+        return
+
+    if not await music_bot.ensure_voice_channel(interaction):
+        return
+
+    await interaction.response.defer() # Defer the response as play_next might take a moment or send followups
+
+    if not music_bot.current_song and music_bot.queue:
+        # If nothing is playing but there's a queue, start playing the first song
+        music_bot.play_next()
+        await interaction.followup.send("Continuing playback from queue.")
+    elif music_bot.current_song and music_bot.voice_client and music_bot.voice_client.is_paused():
+        # If there's a current song and it's paused, just resume
+        music_bot.voice_client.resume()
+        await interaction.followup.send("Resuming playback.")
+    elif music_bot.current_song and music_bot.voice_client and not music_bot.voice_client.is_playing():
+        # Edge case: current_song is set but not playing (e.g., bot just started)
+        # This can happen if bot restarts and current_song is restored but not actively playing.
+        # Ensure voice_client is connected first.
+        music_bot.play_next()
+        await interaction.followup.send("Starting playback from current song.")
+    else:
+        # Should ideally not be reached if previous checks are correct
+        await interaction.followup.send("Could not determine how to continue playback. The queue might be empty or playback is already active.", ephemeral=True)
 
 class QueuePaginator(discord.ui.View):
     def __init__(self, interaction: discord.Interaction, queue, current_song, music_bot):

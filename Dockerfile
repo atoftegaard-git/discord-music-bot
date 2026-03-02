@@ -33,11 +33,11 @@ COPY --from=builder /opt/venv /opt/venv
 WORKDIR /home/appuser/app
 COPY bot.py .
 
-# Explicitly create the default cache file
-RUN touch .cache
+# Create data directory for persistent storage
+RUN mkdir -p /data
 
-# Give appuser ownership of the app directory and its contents
-RUN chown -R appuser:appuser .
+# Give appuser ownership of the app directory and data directory
+RUN chown -R appuser:appuser . /data
 
 # Set the user and activate the virtual environment
 USER appuser

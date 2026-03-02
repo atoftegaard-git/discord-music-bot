@@ -5,3 +5,7 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    volumes:
+      - ./data:/data
+    environment:
+      - SPOTIPY_CACHE_PATH=/data/.cache
