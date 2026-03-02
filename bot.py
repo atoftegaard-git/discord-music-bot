@@ -178,16 +178,15 @@ class MusicBot:
         disconnect_delay = 300  # 5 minutes
         while self.voice_client and self.voice_client.is_connected():
             try:
-                await asyncio.sleep(60) # Check every 20 seconds
+                await asyncio.sleep(60) # Check every minute
 
                 # Filter out bots from member list
                 human_members = [m for m in self.voice_client.channel.members if not m.bot]
 
-                if not human_members and not self.voice_client.is_playing():
-                    # We are alone with other bots, or completely alone
+                if not human_members:
                     if self.empty_since is None:
                         self.empty_since = asyncio.get_event_loop().time()
-                        logging.info(f"Voice channel is empty and not playing. Starting {disconnect_delay}s disconnect timer.")
+                        logging.info(f"Voice channel is empty. Starting {disconnect_delay}s disconnect timer.")
 
                     elapsed = asyncio.get_event_loop().time() - self.empty_since
                     if elapsed >= disconnect_delay:
@@ -195,12 +194,11 @@ class MusicBot:
                         if self.text_channel:
                             await self.text_channel.send("Leaving the voice channel due to inactivity.")
                         await self.voice_client.disconnect()
-                        # After disconnect, the on_voice_state_update will handle cleanup and stop this task
                         break
                 else:
-                    # Humans are present, reset timer if it was running
+                    # Humans are present, reset timer
                     if self.empty_since is not None:
-                        logging.info("Users have returned or playback started. Cancelling disconnect timer.")
+                        logging.info("Users have returned. Cancelling disconnect timer.")
                         self.empty_since = None
             except Exception as e:
                 logging.error(f"An unexpected error occurred in the auto-disconnect task: {e}", exc_info=True)
@@ -994,11 +992,22 @@ async def volume(interaction: discord.Interaction, volume: int):
 @log_command
 async def leave(interaction: discord.Interaction):
     await interaction.response.send_message("Leaving the voice channel...")
-    music_bot.queue = []
-    music_bot.current_song = None
+    
     if music_bot.voice_client:
-        # Disconnect, the on_voice_state_update event will handle cleanup
+        # Stop playback first to prevent the 'after' callback from firing on disconnect
+        if music_bot.voice_client.is_playing():
+            music_bot.voice_client.stop()
+        
+        # Now clear the state
+        music_bot.queue = []
+        music_bot.current_song = None
+        
+        # And finally, disconnect
         await music_bot.voice_client.disconnect()
+    else:
+        # If not in a voice channel, just make sure the queue is clear
+        music_bot.queue = []
+        music_bot.current_song = None
 
 
 @client.event
