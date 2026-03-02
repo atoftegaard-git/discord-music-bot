@@ -970,11 +970,6 @@ async def leave(interaction: discord.Interaction):
         await music_bot.voice_client.disconnect()
 
 
-
-
-
-
-
 @client.event
 async def on_ready():
     if os.getenv('CLEAR_GLOBALS') == 'true':
@@ -990,6 +985,7 @@ async def on_ready():
     guild_id = os.getenv("GUILD_ID")
     if guild_id:
         guild = discord.Object(id=int(guild_id))
+        tree.copy_global_to(guild=guild)
         await tree.sync(guild=guild)
         logging.info(f'Synced commands to guild {guild_id}.')
     else:
