@@ -59,7 +59,8 @@ ytdl_format_options = {
 }
 
 ffmpeg_options = {
-    'options': '-vn -fflags nobuffer -hide_banner -loglevel error -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 2',
+    'options': '-vn -fflags nobuffer -hide_banner -loglevel error'
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
