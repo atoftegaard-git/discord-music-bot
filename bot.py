@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from enum import Enum
 import random
 import json
-import subprocess
+
 
 load_dotenv()
 
@@ -103,7 +103,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
         options = ffmpeg_options.copy()
         if seek > 0:
             options['before_options'] = f"-analyzeduration 0 -probesize 32K -ss {seek}"
-        
+
         return self.__class__(discord.FFmpegPCMAudio(self.data['url'], **options), data=self.data)
 
     @classmethod
@@ -113,7 +113,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
         if platform == SearchPlatform.YOUTUBE:
             logging.info(f"Searching on YouTube for: '{query}'")
             return await cls.from_url(f"ytsearch:{query}", loop=loop, stream=stream, timeout=timeout)
-        
+
         if platform == SearchPlatform.SOUNDCLOUD:
             logging.info(f"Searching on SoundCloud for: '{query}'")
             return await cls.from_url(f"scsearch:{query}", loop=loop, stream=stream, timeout=timeout)
@@ -158,16 +158,65 @@ class MusicBot:
         self.voice_client = None
         self.text_channel = None
         self.repeat_mode = RepeatMode.NONE
-        
+
+        self.autodisconnect_task = None
+        self.empty_since = None
+
         self.data_dir = "/data"
         os.makedirs(self.data_dir, exist_ok=True)
-        
+
         self.settings_file = os.path.join(self.data_dir, "settings.json")
         self.queue_file = os.path.join(self.data_dir, "queue.json")
-        
+
         settings = self._load_settings()
         self.persist_queue = settings.get('persist_queue', False)
         self.prefer_soundcloud = settings.get('prefer_soundcloud', False)
+
+    async def _check_autodisconnect(self):
+        """Periodically checks if the bot is alone and disconnects after a timeout."""
+        disconnect_delay = 300  # 5 minutes
+        while self.voice_client and self.voice_client.is_connected():
+            await asyncio.sleep(60) # Check every 20 seconds
+
+            # Filter out bots from member list
+            human_members = [m for m in self.voice_client.channel.members if not m.bot]
+
+            if not human_members:
+                # We are alone with other bots, or completely alone
+                if self.empty_since is None:
+                    self.empty_since = asyncio.get_event_loop().time()
+                    logging.info(f"Voice channel is empty of users. Starting {disconnect_delay}s disconnect timer.")
+
+                elapsed = asyncio.get_event_loop().time() - self.empty_since
+                if elapsed >= disconnect_delay:
+                    logging.info("Disconnecting due to inactivity.")
+                    if self.text_channel:
+                        await self.text_channel.send("Leaving the voice channel due to inactivity.")
+                    await self.voice_client.disconnect()
+                    # After disconnect, the on_voice_state_update will handle cleanup and stop this task
+                    break
+            else:
+                # Humans are present, reset timer if it was running
+                if self.empty_since is not None:
+                    logging.info("Users have returned to the voice channel. Cancelling disconnect timer.")
+                    self.empty_since = None
+
+    async def handle_disconnect(self):
+        """Cleans up resources when the bot disconnects from voice."""
+        logging.info("Handling disconnect.")
+        if self.autodisconnect_task:
+            self.autodisconnect_task.cancel()
+            self.autodisconnect_task = None
+
+        if self.voice_client and self.voice_client.is_playing():
+            self.voice_client.stop()
+
+        self.empty_since = None
+        self.voice_client = None
+        self.current_song = None
+        # Don't clear queue, so users can use /continue if they rejoin
+        self._save_queue()
+        logging.info("Voice state cleaned up after disconnect.")
 
     def _load_settings(self):
         if not os.path.exists(self.settings_file):
@@ -203,10 +252,10 @@ class MusicBot:
             url = self.current_song.data.get('webpage_url', self.current_song.data.get('url'))
             if url:
                 urls_to_save.append(url)
-        
+
         urls_to_save.extend([
             song.data.get('webpage_url', song.data.get('url'))
-            for song in self.queue 
+            for song in self.queue
             if song.data.get('webpage_url', song.data.get('url'))
         ])
 
@@ -228,11 +277,11 @@ class MusicBot:
 
         if not self.persist_queue or not os.path.exists(self.queue_file):
             return
-        
+
         try:
             with open(self.queue_file, 'r') as f:
                 queue_data = json.load(f)
-            
+
             urls = []
             if isinstance(queue_data, dict) and 'version' in queue_data:
                 if queue_data.get('version') == QUEUE_FORMAT_VERSION:
@@ -246,12 +295,12 @@ class MusicBot:
         except Exception as e:
             logging.error(f"Failed to load queue from file: {e}")
             return
-        
+
         if not urls:
             return
 
         logging.info(f"Loading {len(urls)} songs from persisted queue on startup...")
-        
+
         restored_songs = []
         for url in urls:
             try:
@@ -260,13 +309,13 @@ class MusicBot:
                     restored_songs.extend(players)
             except Exception as e:
                 logging.error(f"Failed to restore song from URL '{url}': {e}")
-        
+
         self.queue.extend(restored_songs)
         logging.info(f"Restored {len(restored_songs)} songs to the queue.")
 
     async def _process_urls_bg(self, urls):
         logging.info(f"Starting background restore of {len(urls)} songs.")
-        
+
         restored_songs = []
         for url in urls:
             try:
@@ -275,7 +324,7 @@ class MusicBot:
                     restored_songs.extend(players)
             except Exception as e:
                 logging.error(f"Failed to restore song from URL '{url}' during background load: {e}")
-        
+
         self.queue.extend(restored_songs)
         self._save_queue()
         logging.info(f"Finished background restore of {len(restored_songs)} songs.")
@@ -289,7 +338,7 @@ class MusicBot:
         """
         if not self.persist_queue or not os.path.exists(self.queue_file):
             return
-        
+
         try:
             with open(self.queue_file, 'r') as f:
                 urls = json.load(f)
@@ -304,6 +353,9 @@ class MusicBot:
             if interaction.user.voice:
                 self.voice_client = await interaction.user.voice.channel.connect()
                 self.text_channel = interaction.channel
+                # Start the auto-disconnect task
+                if not self.autodisconnect_task or self.autodisconnect_task.done():
+                    self.autodisconnect_task = self.bot.loop.create_task(self._check_autodisconnect())
             else:
                 await interaction.response.send_message("You are not connected to a voice channel.", ephemeral=True)
                 return False
@@ -314,9 +366,14 @@ class MusicBot:
             logging.error(f'Player error: {error}', exc_info=True)
             if isinstance(error, discord.errors.ConnectionClosed):
                 logging.warning("Connection closed, attempting to play next song.")
-                return self.play_next()
+                # The connection is closed, let the disconnect handler clean up
+                return
 
         if self.repeat_mode == RepeatMode.SONG and self.current_song:
+            # Need a valid voice client to play
+            if not self.voice_client:
+                logging.warning("play_next called with no voice client, likely after a disconnect. Aborting.")
+                return
             to_play = self.current_song.clone()
             self.voice_client.play(to_play, after=self.play_next)
             return
@@ -328,12 +385,21 @@ class MusicBot:
             self.current_song = None
             asyncio.run_coroutine_threadsafe(self.text_channel.send('Queue finished.'), self.bot.loop)
             if self.repeat_mode != RepeatMode.QUEUE and self.voice_client:
+                # Disconnect, the on_voice_state_update event will handle cleanup
                 asyncio.run_coroutine_threadsafe(self.voice_client.disconnect(), self.bot.loop)
-                self.voice_client = None
             return
 
         self.current_song = self.queue.pop(0)
         to_play = self.current_song.clone()
+
+        # Need a valid voice client to play
+        if not self.voice_client:
+            logging.warning("play_next called with no voice client, likely after a disconnect. Aborting play.")
+            # Put the song back at the front of the queue
+            self.queue.insert(0, self.current_song)
+            self.current_song = None
+            return
+
         self.voice_client.play(to_play, after=self.play_next)
         self._save_queue()
         asyncio.run_coroutine_threadsafe(self.text_channel.send(f"Now playing: **{self.current_song.title}** ({self.current_song.duration_fmt})"), self.bot.loop)
@@ -347,7 +413,7 @@ class MusicBot:
 
         # Create a new audio source starting at the given position
         new_source = self.current_song.clone(seek=position)
-        
+
         # Set the volume on the new source before replacing
         new_source.volume = current_volume
 
@@ -373,7 +439,7 @@ class MusicBot:
         else:
             # If nothing was playing, we need to manually trigger the next song.
             self.play_next()
-        
+
         return True
 
 
@@ -411,7 +477,7 @@ async def _play_logic(interaction: discord.Interaction, query: str, platform: Se
         if not spotify:
             await interaction.followup.send("Spotify support is not configured.")
             return
-        
+
         try:
             if "track" in query:
                 track = spotify.track(query)
@@ -426,7 +492,7 @@ async def _play_logic(interaction: discord.Interaction, query: str, platform: Se
                 await interaction.followup.send("Fetching playlist from Spotify...")
                 results = spotify.playlist_tracks(query)
                 tracks = results['items']
-                
+
                 # Handle paginated results from Spotify API
                 while results['next']:
                     results = spotify.next(results)
@@ -448,9 +514,9 @@ async def _play_logic(interaction: discord.Interaction, query: str, platform: Se
                             # Use the new helper to respect preference
                             task = _search_with_preference(search_query)
                             search_tasks.append(task)
-                    
+
                     # If the queue is empty, find and play the first song immediately
-                    if not music_bot.voice_client.is_playing() and not music_bot.voice_client.is_paused():
+                    if music_bot.voice_client and not music_bot.voice_client.is_playing() and not music_bot.voice_client.is_paused():
                         if search_tasks:
                             first_search_task = search_tasks.pop(0)
                             first_song_result = await first_search_task
@@ -474,7 +540,7 @@ async def _play_logic(interaction: discord.Interaction, query: str, platform: Se
 
                     music_bot.queue.extend(all_players)
                     music_bot._save_queue()
-                    
+
                     final_message = f"Finished adding {len(all_players)} more songs to the queue."
                     if failed_count > 0:
                         final_message += f" ({failed_count} songs failed to load)."
@@ -577,7 +643,7 @@ async def spotify_command(interaction: discord.Interaction, query: str):
     if not spotify:
         await interaction.response.send_message("Spotify support is not configured.", ephemeral=True)
         return
-    
+
     await interaction.response.defer()
 
     try:
@@ -611,7 +677,7 @@ async def persist_queue(interaction: discord.Interaction, enabled: bool):
     music_bot.persist_queue = enabled
     music_bot._save_settings()
     music_bot._save_queue() # Immediately save or clear the queue file
-    
+
     status = "enabled" if enabled else "disabled"
     await interaction.response.send_message(f"Queue persistence has been {status}.")
 
@@ -651,7 +717,7 @@ async def seek(interaction: discord.Interaction, timestamp: str):
         parts = list(map(int, timestamp.split(':')))
         if len(parts) > 3:
             raise ValueError("Invalid timestamp format.")
-        
+
         seconds = 0
         for i, part in enumerate(reversed(parts)):
             seconds += part * (60**i)
@@ -673,7 +739,7 @@ async def shuffle(interaction: discord.Interaction):
     if not music_bot.queue:
         await interaction.response.send_message("The queue is empty, nothing to shuffle.", ephemeral=True)
         return
-    
+
     random.shuffle(music_bot.queue)
     music_bot._save_queue()
     await interaction.response.send_message("The queue has been shuffled!")
@@ -696,7 +762,7 @@ async def remove(interaction: discord.Interaction, position: int):
     if not music_bot.queue or not (1 <= position <= len(music_bot.queue)):
         await interaction.response.send_message("Invalid position.", ephemeral=True)
         return
-        
+
     removed_song = music_bot.queue.pop(position - 1)
     music_bot._save_queue()
     await interaction.response.send_message(f"Removed **{removed_song.title}** from the queue.")
@@ -784,7 +850,7 @@ class QueuePaginator(discord.ui.View):
 
         if self.current_song:
             embed.add_field(name="Now Playing", value=f"**{self.current_song.title}** ({self.current_song.duration_fmt})", inline=False)
-        
+
         if not self.queue:
             embed.description = "The queue is empty."
         else:
@@ -795,13 +861,13 @@ class QueuePaginator(discord.ui.View):
             queue_text = ""
             for i, song in enumerate(queue_slice, start=start_index + 1):
                 queue_text += f"`{i}.` {song.title}\n"
-            
+
             if queue_text:
                 embed.add_field(name="Up Next", value=queue_text, inline=False)
-        
+
         if self.total_pages > 1:
             embed.set_footer(text=f"Page {self.current_page + 1}/{self.total_pages}")
-            
+
         return embed
 
     async def update_view(self, interaction: discord.Interaction):
@@ -825,7 +891,7 @@ class QueuePaginator(discord.ui.View):
     async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.current_page += 1
         await self.update_view(interaction)
-        
+
     @discord.ui.button(label="Shuffle", style=discord.ButtonStyle.secondary, row=1)
     async def shuffle_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.queue:
@@ -900,9 +966,8 @@ async def leave(interaction: discord.Interaction):
     music_bot.queue = []
     music_bot.current_song = None
     if music_bot.voice_client:
-        # Disconnect in the background to avoid blocking the response
-        asyncio.create_task(music_bot.voice_client.disconnect())
-        music_bot.voice_client = None
+        # Disconnect, the on_voice_state_update event will handle cleanup
+        await music_bot.voice_client.disconnect()
 
 
 @client.event
@@ -926,9 +991,19 @@ async def on_ready():
     else:
         await tree.sync()
         logging.info('Synced commands globally.')
-    
+
     await music_bot._load_queue_on_startup()
     logging.info(f'Logged in as {client.user} (ID: {client.user.id})')
     logging.info('------')
+
+@client.event
+async def on_voice_state_update(member, before, after):
+    # Check if the member that changed state is the bot itself
+    if member.id == client.user.id:
+        # Check if the bot has disconnected from a channel
+        if before.channel is not None and after.channel is None:
+            logging.info(f"Bot has disconnected from voice channel: {before.channel.name}")
+            await music_bot.handle_disconnect()
+
 
 client.run(os.getenv("DISCORD_TOKEN"))
