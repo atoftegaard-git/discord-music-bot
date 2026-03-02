@@ -501,8 +501,18 @@ async def _play_logic(interaction: discord.Interaction, query: str, platform: Se
                 platform = None
 
             elif "playlist" in query:
-                await interaction.followup.send("Fetching playlist from Spotify...")
-                results = spotify.playlist_tracks(query)
+                try:
+                    await interaction.followup.send("Fetching playlist from Spotify...")
+                    results = spotify.playlist_tracks(query)
+                except spotipy.SpotifyException as e:
+                    if e.http_status == 404:
+                        logging.warning(f"Could not find Spotify playlist (404): {query}")
+                        await interaction.edit_original_response(content="Could not find that playlist. It might be private, a personal mix, or deleted. I can only access public playlists.")
+                    else:
+                        logging.error(f"An error occurred with Spotify API: {e}", exc_info=True)
+                        await interaction.edit_original_response(content="An error occurred while fetching the Spotify playlist.")
+                    return
+
                 tracks = results['items']
 
                 # Handle paginated results from Spotify API
