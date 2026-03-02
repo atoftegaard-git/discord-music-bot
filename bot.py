@@ -972,47 +972,7 @@ async def leave(interaction: discord.Interaction):
 
 
 
-@tree.command(name="reset_commands", description="Resets all slash commands for this bot.")
-@log_command
-async def reset_commands(interaction: discord.Interaction):
-    """Resets all slash commands for this bot."""
-    app_info = await client.application_info()
-    if interaction.user.id != app_info.owner.id:
-        await interaction.response.send_message("You are not authorized to use this command.", ephemeral=True)
-        return
 
-    await interaction.response.defer()
-
-    logging.info("--- Clearing all commands ---")
-
-    # Clear global commands
-    tree.clear_commands(guild=None)
-    await tree.sync()
-    logging.info("Global commands cleared.")
-
-    # Clear guild commands if a GUILD_ID is set
-    guild_id = os.getenv("GUILD_ID")
-    if guild_id:
-        try:
-            guild = discord.Object(id=int(guild_id))
-            tree.clear_commands(guild=guild)
-            await tree.sync(guild=guild)
-            logging.info(f"Commands for guild {guild_id} cleared.")
-        except (ValueError, discord.HTTPException) as e:
-            logging.error(f"Failed to clear commands for guild {guild_id}: {e}")
-
-    logging.info("--- Re-syncing commands ---")
-
-    # Now, re-sync based on the current environment configuration
-    if guild_id:
-        guild = discord.Object(id=int(guild_id))
-        await tree.sync(guild=guild)
-        logging.info(f'Re-synced commands to guild {guild_id}.')
-    else:
-        await tree.sync()
-        logging.info('Re-synced commands globally.')
-
-    await interaction.followup.send("All slash commands have been reset and re-synced.")
 
 
 @client.event
