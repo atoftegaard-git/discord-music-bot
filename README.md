@@ -55,12 +55,26 @@ This command will:
 
 ## Available Commands
 
--   `/play <query>`: Plays a song from a URL or search query.
--   `/skip`: Skips the current song.
+### Playback Controls
+-   `/play <query>`: Plays a song from a URL or search query (YouTube, SoundCloud, Spotify).
+-   `/youtube <query>`: Searches and plays a song specifically from YouTube.
+-   `/soundcloud <query>`: Searches and plays a song specifically from SoundCloud.
+-   `/spotify <query>`: Searches Spotify for a track and plays the best match from YouTube.
 -   `/stop`: Stops the music and clears the queue.
--   `/queue`: Shows the current song queue.
--   `/clear`: Clears the queue.
+-   `/skip`: Skips to the next song in the queue.
+-   `/continue`: Resumes playback if paused, or starts the queue if stopped.
+-   `/seek <timestamp>`: Seeks to a specific time in the current song (e.g., `1:23`).
+
+### Queue Management
+-   `/queue`: Shows the current song queue with interactive pages.
+-   `/shuffle`: Shuffles the songs currently in the queue.
+-   `/jump <position>`: Jumps to a specific song number in the queue.
+-   `/remove <position>`: Removes a song from the queue by its number.
+-   `/clear`: Clears all songs from the queue.
 -   `/repeat <mode>`: Sets the repeat mode (`none`, `song`, `queue`).
+-   `/persist_queue <enabled>`: Toggles whether the queue is saved when the bot restarts.
+
+### Other Commands
 -   `/volume <0-100>`: Changes the player's volume.
 -   `/leave`: Disconnects the bot from the voice channel.
 -   `/spil`: Sends a special GIF.

@@ -15,6 +15,26 @@ This project is a containerized Discord music bot built with Python. It allows u
 *   Custom logging for all command usage, successes, and errors.
 *   A special `/spil` command that responds with an embedded GIF.
 
+**Available Commands:**
+*   `/play`
+*   `/youtube`
+*   `/soundcloud`
+*   `/spotify`
+*   `/stop`
+*   `/skip`
+*   `/continue`
+*   `/seek`
+*   `/queue`
+*   `/shuffle`
+*   `/jump`
+*   `/remove`
+*   `/clear`
+*   `/repeat`
+*   `/persist_queue`
+*   `/volume`
+*   `/leave`
+*   `/spil`
+
 **Key Technologies:**
 *   **Language:** Python 3.10
 *   **Discord API:** `discord.py`
