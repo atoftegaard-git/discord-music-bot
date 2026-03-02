@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from enum import Enum
 import random
 import json
+import subprocess
 
 load_dotenv()
 
@@ -58,7 +59,7 @@ ytdl_format_options = {
 }
 
 ffmpeg_options = {
-    'options': '-vn -fflags nobuffer'
+    'options': '-vn -fflags nobuffer -hide_banner -loglevel quiet'
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
@@ -382,6 +383,23 @@ tree = app_commands.CommandTree(client)
 music_bot = MusicBot(client)
 
 
+async def _search_with_preference(query: str) -> list | None:
+    """Performs a search on YouTube or SoundCloud based on the bot's preference."""
+    if music_bot.prefer_soundcloud:
+        logging.info(f"Searching SoundCloud first for: '{query}'")
+        players = await YTDLSource.from_search(query, loop=client.loop, stream=True, platform=SearchPlatform.SOUNDCLOUD)
+        if not players:
+            logging.info(f"Not found on SoundCloud, falling back to YouTube for: '{query}'")
+            players = await YTDLSource.from_search(query, loop=client.loop, stream=True, platform=SearchPlatform.YOUTUBE)
+    else: # Default: YouTube first
+        logging.info(f"Searching YouTube first for: '{query}'")
+        players = await YTDLSource.from_search(query, loop=client.loop, stream=True, platform=SearchPlatform.YOUTUBE)
+        if not players:
+            logging.info(f"Not found on YouTube, falling back to SoundCloud for: '{query}'")
+            players = await YTDLSource.from_search(query, loop=client.loop, stream=True, platform=SearchPlatform.SOUNDCLOUD)
+    return players
+
+
 async def _play_logic(interaction: discord.Interaction, query: str, platform: SearchPlatform = None):
     if not await music_bot.ensure_voice_channel(interaction):
         return
@@ -400,9 +418,9 @@ async def _play_logic(interaction: discord.Interaction, query: str, platform: Se
                 artist = track['artists'][0]['name']
                 title = track['name']
                 query = f"{artist} - {title}"
-                logging.info(f"Spotify track URL detected. Searching for '{query}' on YouTube.")
-                # Force platform to YouTube for Spotify track URLs
-                platform = SearchPlatform.YOUTUBE
+                logging.info(f"Spotify track URL detected. Searching for '{query}' with preference.")
+                # Unset platform to allow preference search
+                platform = None
 
             elif "playlist" in query:
                 await interaction.followup.send("Fetching playlist from Spotify...")
@@ -427,8 +445,8 @@ async def _play_logic(interaction: discord.Interaction, query: str, platform: Se
                             artist = track['artists'][0]['name']
                             title = track['name']
                             search_query = f"{artist} - {title}"
-                            # Always search YouTube for Spotify tracks
-                            task = YTDLSource.from_search(search_query, loop=client.loop, stream=True, platform=SearchPlatform.YOUTUBE, timeout=30.0)
+                            # Use the new helper to respect preference
+                            task = _search_with_preference(search_query)
                             search_tasks.append(task)
                     
                     # If the queue is empty, find and play the first song immediately
@@ -484,18 +502,7 @@ async def _play_logic(interaction: discord.Interaction, query: str, platform: Se
         players = await YTDLSource.from_url(query, loop=client.loop, stream=True)
     # Otherwise (it's a /play search), perform search with preference
     else:
-        if music_bot.prefer_soundcloud:
-            logging.info(f"Searching SoundCloud first for: '{query}'")
-            players = await YTDLSource.from_search(query, loop=client.loop, stream=True, platform=SearchPlatform.SOUNDCLOUD)
-            if not players:
-                logging.info(f"Not found on SoundCloud, falling back to YouTube for: '{query}'")
-                players = await YTDLSource.from_search(query, loop=client.loop, stream=True, platform=SearchPlatform.YOUTUBE)
-        else: # Default: YouTube first
-            logging.info(f"Searching YouTube first for: '{query}'")
-            players = await YTDLSource.from_search(query, loop=client.loop, stream=True, platform=SearchPlatform.YOUTUBE)
-            if not players:
-                logging.info(f"Not found on YouTube, falling back to SoundCloud for: '{query}'")
-                players = await YTDLSource.from_search(query, loop=client.loop, stream=True, platform=SearchPlatform.SOUNDCLOUD)
+        players = await _search_with_preference(query)
 
     if not players:
         await interaction.edit_original_response(content='Could not find any songs to play.')
