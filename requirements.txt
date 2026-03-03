@@ -1,5 +1,6 @@
-discord.py
+discord.py>=2.3.2
 yt-dlp
 PyNaCl
+davey
 spotipy
 python-dotenv
