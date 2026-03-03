@@ -54,6 +54,7 @@ ytdl_format_options = {
     'no_warnings': True,
     'default_search': 'ytsearch',  # Default to YouTube search
     'source_address': '0.0.0.0',  # bind to ipv4 since ipv6 addresses cause issues sometimes
+    'cookiefile': '/data/cookies.txt',
     'force_ipv4': True,
     'http_headers': {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
@@ -165,8 +166,6 @@ class MusicBot:
         self.text_channel = None
         self.repeat_mode = RepeatMode.NONE
 
-        self.autodisconnect_task = None
-        self.empty_since = None
         self.loader_semaphore = asyncio.Semaphore(10)
 
         self.data_dir = "/data"
@@ -178,48 +177,12 @@ class MusicBot:
         settings = self._load_settings()
         self.persist_queue = settings.get('persist_queue', False)
 
-    async def _check_autodisconnect(self):
-        """Periodically checks if the bot is alone and disconnects after a timeout."""
-        disconnect_delay = 300  # 5 minutes
-        while self.voice_client and self.voice_client.is_connected():
-            try:
-                await asyncio.sleep(60) # Check every minute
-
-                # Filter out bots from member list
-                human_members = [m for m in self.voice_client.channel.members if not m.bot]
-
-                if not human_members:
-                    if self.empty_since is None:
-                        self.empty_since = asyncio.get_event_loop().time()
-                        logging.info(f"Voice channel is empty. Starting {disconnect_delay}s disconnect timer.")
-
-                    elapsed = asyncio.get_event_loop().time() - self.empty_since
-                    if elapsed >= disconnect_delay:
-                        logging.info("Disconnecting due to inactivity.")
-                        if self.text_channel:
-                            await self.text_channel.send("Leaving the voice channel due to inactivity.")
-                        await self.voice_client.disconnect()
-                        break
-                else:
-                    # Humans are present, reset timer
-                    if self.empty_since is not None:
-                        logging.info("Users have returned. Cancelling disconnect timer.")
-                        self.empty_since = None
-            except Exception as e:
-                logging.error(f"An unexpected error occurred in the auto-disconnect task: {e}", exc_info=True)
-                await asyncio.sleep(60)
-
     async def handle_disconnect(self):
         """Cleans up resources when the bot disconnects from voice."""
         logging.info("Handling disconnect.")
-        if self.autodisconnect_task:
-            self.autodisconnect_task.cancel()
-            self.autodisconnect_task = None
-
         if self.voice_client and self.voice_client.is_playing():
             self.voice_client.stop()
 
-        self.empty_since = None
         self.voice_client = None
         self.current_song = None
         # Don't clear queue, so users can use /continue if they rejoin
@@ -375,9 +338,6 @@ class MusicBot:
             if interaction.user.voice:
                 self.voice_client = await interaction.user.voice.channel.connect()
                 self.text_channel = interaction.channel
-                # Start the auto-disconnect task
-                if not self.autodisconnect_task or self.autodisconnect_task.done():
-                    self.autodisconnect_task = self.bot.loop.create_task(self._check_autodisconnect())
             else:
                 await interaction.response.send_message("You are not connected to a voice channel.", ephemeral=True)
                 return False
@@ -1040,15 +1000,5 @@ async def on_ready():
     await music_bot._load_queue_on_startup()
     logging.info(f'Logged in as {client.user} (ID: {client.user.id})')
     logging.info('------')
-
-@client.event
-async def on_voice_state_update(member, before, after):
-    # Check if the member that changed state is the bot itself
-    if member.id == client.user.id:
-        # Check if the bot has disconnected from a channel
-        if before.channel is not None and after.channel is None:
-            logging.info(f"Bot has disconnected from voice channel: {before.channel.name}")
-            await music_bot.handle_disconnect()
-
 
 client.run(os.getenv("DISCORD_TOKEN"))
