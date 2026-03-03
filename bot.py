@@ -344,6 +344,10 @@ class MusicBot:
         return True
 
     def play_next(self, error=None):
+        if not self.voice_client or not self.voice_client.is_connected():
+            logging.warning("play_next called but bot is not in a voice channel. Aborting.")
+            return
+
         if error:
             logging.error(f'Player error: {error}', exc_info=True)
             if isinstance(error, discord.errors.ConnectionClosed):
