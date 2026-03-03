@@ -1005,4 +1005,13 @@ async def on_ready():
     logging.info(f'Logged in as {client.user} (ID: {client.user.id})')
     logging.info('------')
 
+@client.event
+async def on_voice_state_update(member, before, after):
+    # Check if the member that changed state is the bot itself
+    if member.id == client.user.id:
+        # Check if the bot has disconnected from a channel
+        if before.channel is not None and after.channel is None:
+            logging.info(f"Bot has disconnected from voice channel: {before.channel.name}")
+            await music_bot.handle_disconnect()
+
 client.run(os.getenv("DISCORD_TOKEN"))
