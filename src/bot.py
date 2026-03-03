@@ -151,6 +151,7 @@ QUEUE_FORMAT_VERSION = 1
 
 class MusicBot:
     def __init__(self, bot):
+        global ytdl
         self.bot = bot
         self.queue = []
         self.current_song = None
@@ -176,7 +177,7 @@ class MusicBot:
         else:
             logging.warning(f"No cookies file found at {cookies_path}. Requests will be unauthenticated and may be blocked.")
         
-        self.ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
+        ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
 
     async def handle_disconnect(self):
         """Cleans up resources when the bot disconnects from voice."""
