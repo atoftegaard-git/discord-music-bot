@@ -54,12 +54,6 @@ ytdl_format_options = {
     'no_warnings': True,
     'default_search': 'ytsearch',  # Default to YouTube search
     'source_address': '0.0.0.0',  # bind to ipv4 since ipv6 addresses cause issues sometimes
-    'cookiefile': '/data/cookies.txt',
-    'force_ipv4': True,
-    'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9'
-    },
     'ignoreconfig': True,
     'no_cachedir': True
 }
