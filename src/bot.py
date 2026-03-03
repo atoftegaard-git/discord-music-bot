@@ -170,13 +170,7 @@ class MusicBot:
         settings = self._load_settings()
         self.persist_queue = settings.get('persist_queue', False)
 
-        cookies_path = "/data/cookies.txt"
-        if os.path.exists(cookies_path):
-            logging.info(f"Cookies file found at {cookies_path}. Authenticated requests will be used.")
-            ytdl_format_options['cookiefile'] = cookies_path
-        else:
-            logging.warning(f"No cookies file found at {cookies_path}. Requests will be unauthenticated and may be blocked.")
-        
+        # Initialize ytdl here without any authentication
         ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
 
     async def handle_disconnect(self):
