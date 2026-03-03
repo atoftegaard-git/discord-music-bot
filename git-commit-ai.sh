@@ -1,60 +1,53 @@
 #!/bin/bash
 
 # This script automates committing and pushing changes using a Gemini-generated commit message.
+# It automatically analyzes all changes to tracked files, generates a commit message,
+# commits, and pushes.
 #
 # Usage:
-# ./git-commit-ai.sh "Your description of the changes"
+# ./git-commit-ai.sh
 
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
-export GOOGLE_CLOUD_PROJECT="netic-code-assist"
-# Only run on standard commits (no merge, squash, or amend)
-if [ -z "$2" ]; then
+# --- Untracked Files Check ---
+# Ensures you don't forget to 'git add' new files before running.
+UNTRACKED_FILES=$(git ls-files --others --exclude-standard)
+if [ -n "$UNTRACKED_FILES" ]; then
+  echo "Error: Found untracked files. Please stage them manually with 'git add' before committing."
+  echo "Untracked files:"
+  echo "$UNTRACKED_FILES"
+  exit 1
+fi
 
-  # Check if gemini is installed
-  if ! command -v gemini &> /dev/null; then
-    echo "⚠️ gemini-cli not found. Skipping AI message generation." >&2
-    exit 0
-  fi
+# 1. Get the diff of all tracked files
+echo "🔎 Analyzing changes to all tracked files..."
+# We use 'git diff HEAD' to see all changes that 'git commit -a' would commit.
+DIFF=$(git diff HEAD)
 
-  echo "🤖 Gemini is analyzing your changes..." >&2
-
-  # Get the staged diff
-  DIFF=$(git diff --cached)
-
-  # If diff is empty, exit
-  if [ -z "$DIFF" ]; then
-    exit 0
-  fi
-
-  # Construct the prompt
-  PROMPT="Write a git commit message in the Conventional Commits format based on this diff.
-
-Rules:
-1. Subject line: Must start with one of these exact types: fix, feat, build, chore, ci, docs, style, refactor, perf, test.
-2. Max 50 characters for the subject line.
-3. Body: A single, very concise paragraph explaining the 'why'.
-4. STRICTLY PLAIN TEXT. Do not use markdown, do not use code blocks (no backticks), do not use lists.
-
-Diff:
-$DIFF"
-
-  # Call gemini-cli
-  MSG=$(gemini -m gemini-2.5-flash "$PROMPT" | sed 's/`//g')
-
-  # Prepend the generated message to the commit file
-  # We use a temp file to prepend without overwriting existing comments/templates
-  if [ -n "$MSG" ]; then
-      echo "$MSG" | cat - "$1" > temp && mv temp "$1"
-  fi
+# If no changes, inform the user and exit.
+if [ -z "$DIFF" ]; then
+  echo "✅ No changes to tracked files to commit."
+  exit 0
 fi
 
 # 2. Generate a commit message using Gemini
 echo "🤖 Generating commit message from Gemini..."
 
+# Construct the detailed prompt for Gemini
+GEMINI_PROMPT="Write a git commit message in the Conventional Commits format based on the following diff.
+
+Rules:
+1. Subject line: Must start with one of these exact types: fix, feat, build, chore, ci, docs, style, refactor, perf, test.
+2. Max 72 characters for the subject line.
+3. Body: A single, concise paragraph explaining the 'why' of the changes.
+4. STRICTLY PLAIN TEXT. Do not use markdown, no backticks, no code blocks, no lists.
+
+Diff:
+$DIFF"
+
 # Call the gemini command and store the output
-COMMIT_MSG=$(gemini "$PROMPT")
+COMMIT_MSG=$(gemini -m gemini-2.5-flash "$GEMINI_PROMPT" | sed 's/`//g')
 
 # Check if Gemini returned a message
 if [ -z "$COMMIT_MSG" ]; then
@@ -68,14 +61,12 @@ echo "$COMMIT_MSG"
 echo "--------------------------"
 echo ""
 
-# 3. Stage all tracked changes and commit
-echo "🔨 Staging and committing all changes..."
-git commit -a -m "$COMMIT_MSG"
+# 3. Stage all tracked changes and commit with the generated message
+echo "🔨 Staging and committing all tracked changes..."
+git commit -a -F - <<< "$COMMIT_MSG"
 
 # 4. Push the commit
 echo "🚀 Pushing changes to remote..."
 git push
 
-rm temp
 echo "✅ Done!"
-

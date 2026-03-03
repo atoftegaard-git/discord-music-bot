@@ -63,8 +63,6 @@ ffmpeg_options = {
     'options': '-vn -fflags nobuffer -hide_banner -loglevel error'
 }
 
-ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
-
 def log_command(func):
     @functools.wraps(func)
     async def wrapper(interaction: discord.Interaction, *args, **kwargs):
@@ -177,6 +175,8 @@ class MusicBot:
             ytdl_format_options['cookiefile'] = cookies_path
         else:
             logging.warning(f"No cookies file found at {cookies_path}. Requests will be unauthenticated and may be blocked.")
+        
+        self.ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
 
     async def handle_disconnect(self):
         """Cleans up resources when the bot disconnects from voice."""
