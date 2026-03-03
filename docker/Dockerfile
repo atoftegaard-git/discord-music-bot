@@ -31,7 +31,7 @@ COPY --from=builder /opt/venv /opt/venv
 
 # Copy the application code
 WORKDIR /home/appuser/app
-COPY bot.py .
+COPY src/bot.py .
 
 # Create data directory for persistent storage
 RUN mkdir -p /data
