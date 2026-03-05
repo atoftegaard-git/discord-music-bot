@@ -58,8 +58,6 @@ ytdl_format_options = {
     'ignoreconfig': True,
     'no_cachedir': True,
     'geo_bypass': True,
-    'extract_flat': 'in_playlist',
-    'skip_download': True,
     'user_agent': USER_AGENT,
     'youtube_include_dash_manifest': False,
     'youtube_include_hls_manifest': False,
@@ -144,10 +142,30 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 players = []
                 for entry in data['entries']:
                     if entry:
-                        logging.info(f"Found song on {entry.get('extractor_key')}: {entry.get('title')}")
-                        players.append(cls(discord.FFmpegPCMAudio(entry['url'], **ffmpeg_options), data=entry))
+                        stream_url = entry.get('url')
+                        if stream_url and 'youtube.com/watch' in stream_url:
+                            logging.warning(f"yt-dlp returned a webpage URL instead of a stream for {entry.get('title')}. Trying to extract again without flat extraction.")
+                            # This is a fallback if extract_flat was somehow still involved or if it's a search result
+                            entry = await asyncio.wait_for(loop.run_in_executor(None, lambda: ytdl.extract_info(entry['url'], download=False)), timeout=timeout)
+                            stream_url = entry.get('url')
+
+                        if stream_url:
+                            logging.info(f"Found song on {entry.get('extractor_key')}: {entry.get('title')}")
+                            players.append(cls(discord.FFmpegPCMAudio(stream_url, **ffmpeg_options), data=entry))
                 return players
-            filename = data['url'] if stream else ytdl.prepare_filename(data)
+            
+            stream_url = data.get('url')
+            # If we get a youtube watch URL instead of a stream URL, we need to handle it
+            if stream_url and 'youtube.com/watch' in stream_url:
+                 logging.warning(f"yt-dlp returned a webpage URL instead of a stream for {data.get('title')}. Extracting again.")
+                 data = await asyncio.wait_for(loop.run_in_executor(None, lambda: ytdl.extract_info(stream_url, download=False)), timeout=timeout)
+                 stream_url = data.get('url')
+
+            if not stream_url:
+                logging.error(f"No stream URL found for {data.get('title')}")
+                return None
+
+            filename = stream_url if stream else ytdl.prepare_filename(data)
             logging.info(f"Found song on {data.get('extractor_key')}: {data.get('title')}")
             return [cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)]
         except asyncio.TimeoutError:
