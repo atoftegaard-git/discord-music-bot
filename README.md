@@ -38,6 +38,9 @@ SPOTIPY_CLIENT_SECRET=YOUR_SPOTIFY_CLIENT_SECRET
 # (Optional) For instant command updates during development.
 # Right-click your Discord Server icon > "Copy ID" (Developer Mode must be enabled in Discord settings)
 GUILD_ID=YOUR_DISCORD_GUILD_ID
+
+# (Optional) Proxy for yt-dlp and ffmpeg (e.g., http://user:pass@host:port)
+YTDLP_PROXY=YOUR_PROXY_URL
 ```
 
 ### 3. Build and Run the Bot

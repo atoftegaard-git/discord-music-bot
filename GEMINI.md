@@ -65,6 +65,9 @@ SPOTIPY_CLIENT_SECRET=YOUR_SPOTIFY_CLIENT_SECRET
 
 # (Optional) Your Discord Server ID for instant command updates during development
 GUILD_ID=YOUR_DISCORD_GUILD_ID
+
+# (Optional) Proxy for yt-dlp and ffmpeg (e.g., http://user:pass@host:port)
+YTDLP_PROXY=YOUR_PROXY_URL
 ```
 
 **Running the Bot:**

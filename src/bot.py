@@ -43,6 +43,7 @@ except Exception as e:
     spotify = None
 
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+YTDLP_PROXY = os.getenv('YTDLP_PROXY')
 
 ytdl_format_options = {
     'format': 'bestaudio/best[ext=m4a]/bestaudio/best',
@@ -61,6 +62,7 @@ ytdl_format_options = {
     'user_agent': USER_AGENT,
     'youtube_include_dash_manifest': False,
     'youtube_include_hls_manifest': False,
+    'proxy': YTDLP_PROXY,
     'extractor_args': {
         'youtube': {
             'player_client': ['web', 'android'],
@@ -68,8 +70,12 @@ ytdl_format_options = {
     }
 }
 
+ffmpeg_before_options = f'-reconnect 1 -reconnect_at_eof 1 -reconnect_streamed 1 -reconnect_delay_max 5 -analyzeduration 0 -probesize 32K -user_agent "{USER_AGENT}"'
+if YTDLP_PROXY:
+    ffmpeg_before_options += f' -http_proxy {YTDLP_PROXY}'
+
 ffmpeg_options = {
-    'before_options': f'-reconnect 1 -reconnect_at_eof 1 -reconnect_streamed 1 -reconnect_delay_max 5 -analyzeduration 0 -probesize 32K -user_agent "{USER_AGENT}"',
+    'before_options': ffmpeg_before_options,
     'options': '-vn -fflags +genpts'
 }
 
