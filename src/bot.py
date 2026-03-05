@@ -42,8 +42,10 @@ except Exception as e:
     logging.error(f"Failed to initialize Spotify client: {e}")
     spotify = None
 
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+
 ytdl_format_options = {
-    'format': 'bestaudio/best',
+    'format': 'bestaudio/best[ext=m4a]/bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
     'restrictfilenames': True,
     'noplaylist': False,
@@ -52,15 +54,25 @@ ytdl_format_options = {
     'logtostderr': False,
     'quiet': True,
     'no_warnings': True,
-    'default_search': 'ytsearch',  # Default to YouTube search
-    'source_address': '0.0.0.0',  # bind to ipv4 since ipv6 addresses cause issues sometimes
+    'default_search': 'ytsearch',
     'ignoreconfig': True,
-    'no_cachedir': True
+    'no_cachedir': True,
+    'geo_bypass': True,
+    'extract_flat': 'in_playlist',
+    'skip_download': True,
+    'user_agent': USER_AGENT,
+    'youtube_include_dash_manifest': False,
+    'youtube_include_hls_manifest': False,
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['web', 'android'],
+        }
+    }
 }
 
 ffmpeg_options = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 2',
-    'options': '-vn -fflags nobuffer -hide_banner -loglevel error'
+    'before_options': f'-reconnect 1 -reconnect_at_eof 1 -reconnect_streamed 1 -reconnect_delay_max 5 -analyzeduration 0 -probesize 32K -user_agent "{USER_AGENT}"',
+    'options': '-vn -fflags +genpts'
 }
 
 def log_command(func):
@@ -345,48 +357,50 @@ class MusicBot:
             return
 
         if error:
-            logging.error(f'Player error: {error}', exc_info=True)
+            logging.error(f'Player error in play_next: {error}', exc_info=True)
             if isinstance(error, discord.errors.ConnectionClosed):
-                logging.warning("Connection closed, attempting to play next song.")
-                # The connection is closed, let the disconnect handler clean up
+                logging.warning("Connection closed detected in play_next. The disconnect handler should handle this.")
                 return
 
         if self.repeat_mode == RepeatMode.SONG and self.current_song:
-            # Need a valid voice client to play
-            if not self.voice_client:
-                logging.warning("play_next called with no voice client, likely after a disconnect. Aborting.")
-                return
+            logging.info(f"Repeating current song: {self.current_song.title}")
             to_play = self.current_song.clone()
             self.voice_client.play(to_play, after=self.play_next)
             return
 
         if self.repeat_mode == RepeatMode.QUEUE and self.current_song:
+            logging.info(f"Queue repeat enabled. Re-adding {self.current_song.title} to the end of the queue.")
             self.queue.append(self.current_song)
 
         if not self.queue:
+            logging.info("Queue is empty.")
             self.current_song = None
             asyncio.run_coroutine_threadsafe(self.text_channel.send('Queue finished.'), self.bot.loop)
             if self.repeat_mode != RepeatMode.QUEUE and self.voice_client:
-                logging.info("Queue is empty and repeat is off, disconnecting.")
-                # Disconnect, the on_voice_state_update event will handle cleanup
+                logging.info("Disconnecting as the queue is empty and repeat is off.")
                 asyncio.run_coroutine_threadsafe(self.voice_client.disconnect(), self.bot.loop)
             return
 
         self.current_song = self.queue.pop(0)
-        to_play = self.current_song.clone()
+        logging.info(f"Attempting to play next song: {self.current_song.title} (Duration: {self.current_song.duration_fmt})")
+        
+        try:
+            to_play = self.current_song.clone()
+            
+            if not self.voice_client or not self.voice_client.is_connected():
+                logging.warning("Voice client disconnected while trying to play next song. Re-queueing.")
+                self.queue.insert(0, self.current_song)
+                self.current_song = None
+                return
 
-        # Need a valid voice client to play
-        if not self.voice_client or not self.voice_client.is_connected():
-            logging.warning("play_next called with no voice client or a disconnected one, likely after a disconnect. Aborting play.")
-            # Put the song back at the front of the queue
-            self.queue.insert(0, self.current_song)
-            self.current_song = None
-            return
-
-        self.voice_client.play(to_play, after=self.play_next)
-        self._save_queue()
-        logging.info(f"Starting playback of '{self.current_song.title}' from {self.current_song.platform}.")
-        asyncio.run_coroutine_threadsafe(self.text_channel.send(f"Now playing: **{self.current_song.title}** ({self.current_song.duration_fmt})"), self.bot.loop)
+            self.voice_client.play(to_play, after=self.play_next)
+            self._save_queue()
+            logging.info(f"Successfully started playback of '{self.current_song.title}' from {self.current_song.platform}.")
+            asyncio.run_coroutine_threadsafe(self.text_channel.send(f"Now playing: **{self.current_song.title}** ({self.current_song.duration_fmt})"), self.bot.loop)
+        except Exception as e:
+            logging.error(f"Failed to play next song '{self.current_song.title}': {e}", exc_info=True)
+            asyncio.run_coroutine_threadsafe(self.text_channel.send(f"⚠️ Error playing **{self.current_song.title}**. Skipping to next..."), self.bot.loop)
+            self.play_next() # Try the next one if this one failed to start
 
     async def seek(self, position: int):
         if not self.voice_client or not self.voice_client.is_playing() or not self.current_song:
@@ -977,6 +991,7 @@ async def leave(interaction: discord.Interaction):
 
 @client.event
 async def on_ready():
+    logging.info(f"yt-dlp version: {yt_dlp.version.__version__}")
     if os.getenv('CLEAR_GLOBALS') == 'true':
         logging.info("--- COMMAND CLEANUP MODE ---")
         logging.info("Clearing all global commands. This may take a minute...")
